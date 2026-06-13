@@ -111,3 +111,19 @@ export async function getConversionTotals(
     .map(([conversionAction, total]) => ({ conversionAction, total }))
     .sort((a, b) => b.total - a.total);
 }
+
+// Debug helper — test OAuth + one GAQL call
+export async function testGadsConnection(): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const token = await getAccessToken();
+    const rows = await gaql(`
+      SELECT campaign.id, campaign.name
+      FROM campaign
+      WHERE campaign.status = 'ENABLED'
+      LIMIT 1
+    `);
+    return { ok: true, detail: `OAuth OK. Got ${rows.length} campaign row(s). First: ${JSON.stringify(rows[0] ?? {})}` };
+  } catch (err) {
+    return { ok: false, detail: String(err) };
+  }
+}

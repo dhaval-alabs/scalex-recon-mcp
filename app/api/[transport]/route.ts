@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { testGadsConnection } from "../../../lib/gads-client";
 import { reconcileRelayVsGads } from "../../../lib/tools/reconcile_relay_vs_gads";
 import { getRelayHealth } from "../../../lib/tools/get_relay_health";
 import { verifyBatchLanded } from "../../../lib/tools/verify_batch_landed";
@@ -32,7 +33,10 @@ const tools = [
         days: {
           type: "number",
           description: "Number of days to look back. Default 7.",
-          default: 7,
+          case "test_gads_connection":
+      return await testGadsConnection();
+
+    default: 7,
         },
       },
     },
@@ -74,11 +78,19 @@ const tools = [
           type: "string",
           enum: ["daily", "weekly"],
           description: "daily or weekly rollup. Default daily.",
-          default: "daily",
+          case "test_gads_connection":
+      return await testGadsConnection();
+
+    default: "daily",
         },
       },
     },
   },
+  ,{
+    name: "test_gads_connection",
+    description: "Debug tool — tests OAuth and one GAQL call to verify Google Ads API connectivity.",
+    inputSchema: { type: "object", properties: {} },
+  }
 ];
 
 async function callTool(name: string, args: Record<string, unknown>) {
@@ -97,6 +109,9 @@ async function callTool(name: string, args: Record<string, unknown>) {
 
     case "get_signal_quality_trend":
       return await getSignalQualityTrend(args as { days?: number; granularity?: "daily" | "weekly" });
+
+    case "test_gads_connection":
+      return await testGadsConnection();
 
     default:
       throw new Error(`Unknown tool: ${name}`);
