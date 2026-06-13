@@ -6,6 +6,12 @@ import { verifyBatchLanded } from "../../../lib/tools/verify_batch_landed";
 import { getCoverageBySource } from "../../../lib/tools/get_coverage_by_source";
 import { getSignalQualityTrend } from "../../../lib/tools/get_signal_quality_trend";
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
@@ -92,6 +98,10 @@ async function callTool(name: string, args: Record<string, unknown>) {
   }
 }
 
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -109,11 +119,11 @@ export async function POST(req: NextRequest) {
     }
 
     if (method === "notifications/initialized") {
-      return new NextResponse(null, { status: 204 });
+      return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
     }
 
     if (method === "tools/list") {
-      return NextResponse.json({ jsonrpc: "2.0", id, result: { tools } });
+      return NextResponse.json({ jsonrpc: "2.0", id, result: { tools } }, { headers: CORS_HEADERS });
     }
 
     if (method === "tools/call") {
@@ -127,13 +137,13 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(
       { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } },
-      { status: 404 }
+      { status: 404, headers: CORS_HEADERS }
     );
   } catch (err) {
     console.error("[ScaleX Recon MCP] Error:", err);
     return NextResponse.json(
       { jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }
@@ -143,5 +153,5 @@ export async function GET() {
     status: "ScaleX Reconciliation MCP running",
     version: "1.0.0",
     tools: tools.map((t) => t.name),
-  });
+  }, { headers: CORS_HEADERS });
 }
