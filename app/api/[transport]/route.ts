@@ -99,15 +99,19 @@ async function callTool(name: string, args: Record<string, unknown>) {
 }
 
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+  return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
 }
 
 function corsJson(data: unknown, init?: { status?: number }) {
-  const res = NextResponse.json(data, init);
-  res.headers.set("Access-Control-Allow-Origin", "*");
-  res.headers.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.headers.set("Access-Control-Allow-Headers", "Content-Type");
-  return res;
+  return new Response(JSON.stringify(data), {
+    status: init?.status ?? 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -127,7 +131,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (method === "notifications/initialized") {
-      const r204 = new NextResponse(null, { status: 204 }); r204.headers.set("Access-Control-Allow-Origin","*"); return r204;
+      return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
     }
 
     if (method === "tools/list") {
