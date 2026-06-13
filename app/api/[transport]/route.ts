@@ -165,5 +165,5 @@ export async function GET() {
     status: "ScaleX Reconciliation MCP running",
     version: "1.0.0",
     tools: tools.map((t) => t.name),
-  }, { headers: CORS_HEADERS });
+  });
 }
