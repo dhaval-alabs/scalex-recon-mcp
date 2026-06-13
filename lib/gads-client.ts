@@ -1,12 +1,9 @@
-// Google Ads client — uses the same REST API pattern as GAds_Vercel_MCP
-// Fetches conversion action stats for reconciliation
-
 const CUSTOMER_ID = process.env.GOOGLE_ADS_CUSTOMER_ID ?? "4064995850";
+const MCC_ID = process.env.GOOGLE_ADS_MCC_ID ?? "8910137241";
 const DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN!;
 const REFRESH_TOKEN = process.env.GOOGLE_ADS_REFRESH_TOKEN!;
 const CLIENT_ID = process.env.GOOGLE_ADS_CLIENT_ID!;
 const CLIENT_SECRET = process.env.GOOGLE_ADS_CLIENT_SECRET!;
-
 const GADS_API_VERSION = "v19";
 
 async function getAccessToken(): Promise<string> {
@@ -25,33 +22,8 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-export interface ConversionDayStat {
-  date: string;
-  conversionAction: string;
-  conversions: number;
-  conversionValue: number;
-}
-
-// Get daily conversion counts for _sclx actions over a date range
-export async function getConversionsByDay(
-  startDate: string,
-  endDate: string,
-  actionNames?: string[]
-): Promise<ConversionDayStat[]> {
+async function gaql(query: string): Promise<any[]> {
   const accessToken = await getAccessToken();
-
-  const query = `
-    SELECT
-      segments.date,
-      conversion_action.name,
-      metrics.conversions,
-      metrics.conversions_value
-    FROM conversion_action
-    WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
-      AND conversion_action.status = 'ENABLED'
-    ORDER BY segments.date DESC
-  `;
-
   const res = await fetch(
     `https://googleads.googleapis.com/${GADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:search`,
     {
@@ -59,40 +31,62 @@ export async function getConversionsByDay(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "developer-token": DEVELOPER_TOKEN,
+        "login-customer-id": MCC_ID,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ query }),
     }
   );
-
   const data = await res.json();
   if (data.error) throw new Error(`Google Ads API error: ${JSON.stringify(data.error)}`);
+  return data.results ?? [];
+}
 
-  const rows: ConversionDayStat[] = (data.results ?? []).map((r: any) => ({
+export interface ConversionDayStat {
+  date: string;
+  conversionAction: string;
+  conversions: number;
+  conversionValue: number;
+}
+
+export async function getConversionsByDay(
+  startDate: string,
+  endDate: string,
+  actionNames?: string[]
+): Promise<ConversionDayStat[]> {
+  const rows = await gaql(`
+    SELECT
+      segments.date,
+      segments.conversion_action_name,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM campaign
+    WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
+      AND campaign.status = 'ENABLED'
+    ORDER BY segments.date DESC
+  `);
+
+  const results: ConversionDayStat[] = rows.map((r: any) => ({
     date: r.segments?.date ?? "",
-    conversionAction: r.conversionAction?.name ?? "",
+    conversionAction: r.segments?.conversionActionName ?? "",
     conversions: parseFloat(r.metrics?.conversions ?? "0"),
     conversionValue: parseFloat(r.metrics?.conversionsValue ?? "0"),
   }));
 
-  // Filter to requested action names if specified
   if (actionNames && actionNames.length > 0) {
-    return rows.filter((r) =>
+    return results.filter((r) =>
       actionNames.some((n) => r.conversionAction.toLowerCase().includes(n.toLowerCase()))
     );
   }
-
-  return rows;
+  return results;
 }
 
-// Get total conversions per action over a date range
 export async function getConversionTotals(
   startDate: string,
   endDate: string
 ): Promise<{ conversionAction: string; total: number; value: number }[]> {
   const rows = await getConversionsByDay(startDate, endDate);
   const map = new Map<string, { total: number; value: number }>();
-
   for (const r of rows) {
     const existing = map.get(r.conversionAction) ?? { total: 0, value: 0 };
     map.set(r.conversionAction, {
@@ -100,7 +94,6 @@ export async function getConversionTotals(
       value: existing.value + r.conversionValue,
     });
   }
-
   return Array.from(map.entries())
     .map(([conversionAction, stats]) => ({ conversionAction, ...stats }))
     .sort((a, b) => b.total - a.total);

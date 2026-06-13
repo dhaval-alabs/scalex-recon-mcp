@@ -1,5 +1,16 @@
 import { readRelayLogByDateRange } from "../sheets-client";
 
+// Parse M/D/YYYY or YYYY-MM-DD timestamps to YYYY-MM-DD
+function parseRowDate(timestamp: string): string {
+  if (!timestamp) return "";
+  const mdyMatch = timestamp.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (mdyMatch) {
+    const [, m, d, y] = mdyMatch;
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  return timestamp.substring(0, 10);
+}
+
 export async function getSignalQualityTrend(params: {
   days?: number;
   granularity?: "daily" | "weekly";
@@ -11,20 +22,20 @@ export async function getSignalQualityTrend(params: {
   const rows = await readRelayLogByDateRange(startDate, endDate);
   if (rows.length === 0) return { error: "No rows found for period" };
 
-  // Group by date
+  // Group by date using parseRowDate
   const byDate = new Map<
     string,
-    { total: number; gclidLsq: number; gclidCookie: number; gclidNone: number; ecOnly: number; failed: number }
+    { total: number; gclidAttached: number; gclidNone: number; ecOnly: number; failed: number }
   >();
 
   for (const r of rows) {
-    const date = r.timestamp.substring(0, 10);
+    const date = parseRowDate(r.timestamp);
+    if (!date) continue;
     const existing = byDate.get(date) ?? {
-      total: 0, gclidLsq: 0, gclidCookie: 0, gclidNone: 0, ecOnly: 0, failed: 0,
+      total: 0, gclidAttached: 0, gclidNone: 0, ecOnly: 0, failed: 0,
     };
     existing.total++;
-    if (r.gclidSource === "gclid+ec") existing.gclidLsq++;
-    else if (r.gclidSource === "NEVER_MATCHES") existing.gclidCookie++;
+    if (r.gclidSource === "gclid+ec") existing.gclidAttached++;
     else existing.gclidNone++;
     if (r.status === "SUCCESS_EC_ONLY") existing.ecOnly++;
     if (r.status?.includes("FAIL")) existing.failed++;
@@ -39,9 +50,7 @@ export async function getSignalQualityTrend(params: {
     .map(([date, d]) => ({
       date,
       total: d.total,
-      gclid_attach_rate: pct(d.gclidLsq + d.gclidCookie, d.total),
-      lsq_gclid_rate: pct(d.gclidLsq, d.total),
-      cookie_recovery_rate: pct(d.gclidCookie, d.total),
+      gclid_attach_rate: pct(d.gclidAttached, d.total),
       ec_only_rate: pct(d.gclidNone, d.total),
       error_rate: pct(d.failed, d.total),
     }));
@@ -55,29 +64,28 @@ export async function getSignalQualityTrend(params: {
       existing.push(row);
       weekMap.set(weekStart, existing);
     }
-    trend = Array.from(weekMap.entries()).map(([week, rows]) => {
-      const total = rows.reduce((s, r) => s + r.total, 0);
-      const avg = (key: keyof typeof rows[0]) =>
-        parseFloat((rows.reduce((s, r) => s + (r[key] as number), 0) / rows.length).toFixed(1));
-      return {
-        date: `week_of_${week}`,
-        total,
-        gclid_attach_rate: avg("gclid_attach_rate"),
-        lsq_gclid_rate: avg("lsq_gclid_rate"),
-        cookie_recovery_rate: avg("cookie_recovery_rate"),
-        ec_only_rate: avg("ec_only_rate"),
-        error_rate: avg("error_rate"),
-      };
-    });
+    trend = Array.from(weekMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, rows]) => {
+        const total = rows.reduce((s, r) => s + r.total, 0);
+        const avg = (key: keyof typeof rows[0]) =>
+          parseFloat((rows.reduce((s, r) => s + (r[key] as number), 0) / rows.length).toFixed(1));
+        return {
+          date: `week_of_${week}`,
+          total,
+          gclid_attach_rate: avg("gclid_attach_rate"),
+          ec_only_rate: avg("ec_only_rate"),
+          error_rate: avg("error_rate"),
+        };
+      });
   }
 
-  // Compare first half vs second half for trend direction
+  // Trend direction
   const mid = Math.floor(trend.length / 2);
   const firstHalf = trend.slice(0, mid);
   const secondHalf = trend.slice(mid);
   const avgAttach = (arr: typeof trend) =>
     arr.reduce((s, r) => s + r.gclid_attach_rate, 0) / Math.max(arr.length, 1);
-
   const trendDirection =
     avgAttach(secondHalf) > avgAttach(firstHalf) + 2
       ? "📈 IMPROVING"
