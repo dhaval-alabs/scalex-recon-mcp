@@ -18,7 +18,7 @@ export async function getCoverageBySource(params: {
   >();
 
   for (const r of rows) {
-    const stage = r.stage || "UNKNOWN";
+    const stage = r.newStage || "UNKNOWN";
     const existing = byStage.get(stage) ?? {
       total: 0, success: 0, ecOnly: 0, noGclid: 0, skipped: 0, failed: 0,
     };
@@ -27,7 +27,7 @@ export async function getCoverageBySource(params: {
     else if (r.status === "SUCCESS_EC_ONLY") existing.ecOnly++;
     else if (r.status?.includes("SKIP")) existing.skipped++;
     else if (r.status?.includes("FAIL")) existing.failed++;
-    if (r.gclidSource === "none") existing.noGclid++;
+    if (r.gclidSource === "none" || r.gclidSource === "ec_only") existing.noGclid++;
     byStage.set(stage, existing);
   }
 

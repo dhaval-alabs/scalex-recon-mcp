@@ -19,17 +19,28 @@ function getSheetsClient() {
   return google.sheets({ version: "v4", auth: getAuthClient() });
 }
 
+// Actual relay log columns (21 columns, A-U):
+// A=Timestamp, B=Status, C=OldStage, D=NewStage, E=GCLID, F=Value,
+// G=ProspectID, H=Name, I=Email, J=Phone, K=Source, L=Medium,
+// M=Campaign, N=PageURL, O=LeadScore, P=EngagementScore,
+// Q=FBClickID, R=HashedEmail, S=HashedPhone, T=GCLIDSource, U=Message
+
 export interface RelayLogRow {
   timestamp: string;
-  prospectId: string;
-  email: string;
-  stage: string;
-  gclid: string;
-  gclidSource: string;
   status: string;
-  conversionAction: string;
-  conversionValue: number;
-  batchId: string;
+  oldStage: string;
+  newStage: string;
+  gclid: string;
+  value: number;
+  prospectId: string;
+  name: string;
+  email: string;
+  phone: string;
+  source: string;
+  medium: string;
+  campaign: string;
+  gclidSource: string; // col T: 'gclid+ec', 'ec_only', 'none'
+  message: string;    // col U
 }
 
 export interface BatchLogRow {
@@ -40,26 +51,44 @@ export interface BatchLogRow {
   status: string;
 }
 
+// Parse M/D/YYYY HH:MM:SS or YYYY-MM-DD timestamps to YYYY-MM-DD
+function parseRowDate(timestamp: string): string {
+  if (!timestamp) return "";
+  // Handle M/D/YYYY HH:MM:SS format (Google Sheets default)
+  const mdyMatch = timestamp.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (mdyMatch) {
+    const [, m, d, y] = mdyMatch;
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  // Handle YYYY-MM-DD format
+  return timestamp.substring(0, 10);
+}
+
 // Read raw rows from the Log tab
-export async function readRelayLog(limit = 500): Promise<RelayLogRow[]> {
+export async function readRelayLog(limit = 10000): Promise<RelayLogRow[]> {
   const sheets = getSheetsClient();
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: RELAY_LOG_SPREADSHEET_ID,
-    range: `Log!A2:Z${limit + 1}`,
+    range: `Log!A2:U${limit + 1}`,
   });
 
   const rows = response.data.values ?? [];
   return rows.map((r) => ({
-    timestamp: r[0] ?? "",
-    prospectId: r[1] ?? "",
-    email: r[2] ?? "",
-    stage: r[3] ?? "",
-    gclid: r[4] ?? "",
-    gclidSource: r[5] ?? "",
-    status: r[6] ?? "",
-    conversionAction: r[7] ?? "",
-    conversionValue: parseFloat(r[8] ?? "0"),
-    batchId: r[9] ?? "",
+    timestamp:   r[0]  ?? "",
+    status:      r[1]  ?? "",
+    oldStage:    r[2]  ?? "",
+    newStage:    r[3]  ?? "",
+    gclid:       r[4]  ?? "",
+    value:       parseFloat(r[5] ?? "0"),
+    prospectId:  r[6]  ?? "",
+    name:        r[7]  ?? "",
+    email:       r[8]  ?? "",
+    phone:       r[9]  ?? "",
+    source:      r[10] ?? "",
+    medium:      r[11] ?? "",
+    campaign:    r[12] ?? "",
+    gclidSource: r[19] ?? "",  // col T
+    message:     r[20] ?? "",  // col U
   }));
 }
 
@@ -68,10 +97,10 @@ export async function readRelayLogByDateRange(
   startDate: string,
   endDate: string
 ): Promise<RelayLogRow[]> {
-  const all = await readRelayLog(5000);
+  const all = await readRelayLog(10000);
   return all.filter((r) => {
     if (!r.timestamp) return false;
-    const d = r.timestamp.substring(0, 10);
+    const d = parseRowDate(r.timestamp);
     return d >= startDate && d <= endDate;
   });
 }

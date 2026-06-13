@@ -18,10 +18,10 @@ export async function getRelayHealth(params: { days?: number }) {
     statusCounts.set(s, (statusCounts.get(s) ?? 0) + 1);
   }
 
-  // GCLID source breakdown
+  // GCLID source breakdown — actual values: 'gclid+ec', 'ec_only', 'none'
   const gclidSourceCounts = new Map<string, number>();
   for (const r of rows) {
-    const s = r.gclidSource || "unknown";
+    const s = r.gclidSource || "none";
     gclidSourceCounts.set(s, (gclidSourceCounts.get(s) ?? 0) + 1);
   }
 
@@ -35,9 +35,9 @@ export async function getRelayHealth(params: { days?: number }) {
     .filter(([k]) => k.includes("SKIP"))
     .reduce((s, [, v]) => s + v, 0);
 
-  const gclidLsq = gclidSourceCounts.get("lsq") ?? 0;
-  const gclidCookie = gclidSourceCounts.get("gcl_aw") ?? 0;
-  const gclidNone = gclidSourceCounts.get("none") ?? 0;
+  // gclid+ec = has GCLID (from LSQ or cookie), ec_only = no GCLID
+  const gclidAttached = gclidSourceCounts.get("gclid+ec") ?? 0;
+  const gclidNone = (gclidSourceCounts.get("ec_only") ?? 0) + (gclidSourceCounts.get("none") ?? 0);
 
   const pct = (n: number) => `${((n / total) * 100).toFixed(1)}%`;
 
@@ -49,20 +49,15 @@ export async function getRelayHealth(params: { days?: number }) {
       SUCCESS_EC_ONLY: { count: ecOnly, pct: pct(ecOnly) },
       FAILED: { count: failed, pct: pct(failed) },
       SKIPPED: { count: skipped, pct: pct(skipped) },
-      other: Object.fromEntries(
-        Array.from(statusCounts.entries()).filter(
-          ([k]) => !["SUCCESS", "SUCCESS_EC_ONLY"].includes(k) && !k.includes("FAIL") && !k.includes("SKIP")
-        )
-      ),
     },
-    gclid_source_breakdown: {
-      lsq: { count: gclidLsq, pct: pct(gclidLsq), label: "Direct from LSQ API" },
-      gcl_aw: { count: gclidCookie, pct: pct(gclidCookie), label: "Cookie recovery (Mechanism B)" },
-      none: { count: gclidNone, pct: pct(gclidNone), label: "⚠️ No GCLID — EC only or missed" },
-    },
+    gclid_source_breakdown: Object.fromEntries(
+      Array.from(gclidSourceCounts.entries()).map(([k, v]) => [
+        k, { count: v, pct: pct(v) }
+      ])
+    ),
     rates: {
-      gclid_attach_rate: pct(gclidLsq + gclidCookie),
-      ec_only_rate: pct(ecOnly),
+      gclid_attach_rate: pct(gclidAttached),
+      ec_only_rate: pct(gclidNone),
       error_rate: pct(failed),
       skip_rate: pct(skipped),
     },

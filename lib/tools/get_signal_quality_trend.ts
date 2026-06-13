@@ -23,8 +23,8 @@ export async function getSignalQualityTrend(params: {
       total: 0, gclidLsq: 0, gclidCookie: 0, gclidNone: 0, ecOnly: 0, failed: 0,
     };
     existing.total++;
-    if (r.gclidSource === "lsq") existing.gclidLsq++;
-    else if (r.gclidSource === "gcl_aw") existing.gclidCookie++;
+    if (r.gclidSource === "gclid+ec") existing.gclidLsq++;
+    else if (r.gclidSource === "NEVER_MATCHES") existing.gclidCookie++;
     else existing.gclidNone++;
     if (r.status === "SUCCESS_EC_ONLY") existing.ecOnly++;
     if (r.status?.includes("FAIL")) existing.failed++;
