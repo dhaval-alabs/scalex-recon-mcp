@@ -149,13 +149,13 @@ export async function POST(req: NextRequest) {
 
     return corsJson(
       { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } },
-      { status: 404, headers: CORS_HEADERS }
+      { status: 404}
     );
   } catch (err) {
     console.error("[ScaleX Recon MCP] Error:", err);
     return corsJson(
       { jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null },
-      { status: 500, headers: CORS_HEADERS }
+      { status: 500}
     );
   }
 }
