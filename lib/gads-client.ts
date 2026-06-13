@@ -1,10 +1,10 @@
-const CUSTOMER_ID = process.env.GOOGLE_ADS_CUSTOMER_ID ?? "4064995850";
-const MCC_ID = process.env.GOOGLE_ADS_MCC_ID ?? "8910137241";
+const CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID ?? "4064995850").replace(/-/g, "");
+const MCC_ID = (process.env.GOOGLE_ADS_MCC_ID ?? "8910137241").replace(/-/g, "");
 const DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN!;
 const REFRESH_TOKEN = process.env.GOOGLE_ADS_REFRESH_TOKEN!;
 const CLIENT_ID = process.env.GOOGLE_ADS_CLIENT_ID!;
 const CLIENT_SECRET = process.env.GOOGLE_ADS_CLIENT_SECRET!;
-const GADS_API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v23";
+const API_VER = process.env.GOOGLE_ADS_API_VERSION ?? "v23";
 
 async function getAccessToken(): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
@@ -30,24 +30,24 @@ function pick(obj: unknown, path: string): unknown {
 
 async function gaql(query: string): Promise<Row[]> {
   const accessToken = await getAccessToken();
-  const res = await fetch(
-    `https://googleads.googleapis.com/${GADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:search`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "developer-token": DEVELOPER_TOKEN,
-        "login-customer-id": MCC_ID,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query }),
-    }
-  );
+  const url = `https://googleads.googleapis.com/${API_VER}/customers/${CUSTOMER_ID}/googleAds:search`;
+  
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "developer-token": DEVELOPER_TOKEN,
+      "login-customer-id": MCC_ID,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const body = await res.text();
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Google Ads API error (HTTP ${res.status}): ${body.slice(0, 500)}`);
+    throw new Error(`Google Ads API error (HTTP ${res.status}) URL:${url} MCC:${MCC_ID} CUST:${CUSTOMER_ID} API:${API_VER} Body:${body.slice(0, 200)}`);
   }
-  const data = await res.json() as { results?: Row[] };
+  const data = JSON.parse(body) as { results?: Row[] };
   return data.results ?? [];
 }
 
@@ -58,7 +58,6 @@ export interface ConversionDayStat {
   conversionValue: number;
 }
 
-// Uses same pattern as working get_conversion_stats in alabs-mcp-server
 export async function getConversionsByDay(
   startDate: string,
   endDate: string,
@@ -76,7 +75,6 @@ export async function getConversionsByDay(
     ORDER BY segments.date DESC
   `);
 
-  // Aggregate by date + action name (rows come back per-campaign, need to sum)
   const map = new Map<string, ConversionDayStat>();
   for (const r of rows) {
     const date = String(pick(r, "segments.date") ?? "");
@@ -89,7 +87,6 @@ export async function getConversionsByDay(
   }
 
   let results = Array.from(map.values());
-
   if (actionNames && actionNames.length > 0) {
     results = results.filter((r) =>
       actionNames.some((n) => r.conversionAction.toLowerCase().includes(n.toLowerCase()))
@@ -112,17 +109,26 @@ export async function getConversionTotals(
     .sort((a, b) => b.total - a.total);
 }
 
-// Debug helper — test OAuth + one GAQL call
-export async function testGadsConnection(): Promise<{ ok: boolean; detail: string }> {
+export async function testGadsConnection(): Promise<{ ok: boolean; detail: string; url?: string }> {
   try {
     const token = await getAccessToken();
-    const rows = await gaql(`
-      SELECT campaign.id, campaign.name
-      FROM campaign
-      WHERE campaign.status = 'ENABLED'
-      LIMIT 1
-    `);
-    return { ok: true, detail: `OAuth OK. Got ${rows.length} campaign row(s). First: ${JSON.stringify(rows[0] ?? {})}` };
+    const url = `https://googleads.googleapis.com/${API_VER}/customers/${CUSTOMER_ID}/googleAds:search`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "developer-token": DEVELOPER_TOKEN,
+        "login-customer-id": MCC_ID,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "SELECT campaign.id, campaign.name FROM campaign WHERE campaign.status = 'ENABLED' LIMIT 1" }),
+    });
+    const body = await res.text();
+    return {
+      ok: res.ok,
+      url,
+      detail: `HTTP ${res.status} | MCC:${MCC_ID} | CUST:${CUSTOMER_ID} | API:${API_VER} | Body: ${body.slice(0, 300)}`,
+    };
   } catch (err) {
     return { ok: false, detail: String(err) };
   }
