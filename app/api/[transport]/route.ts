@@ -12,8 +12,7 @@ export const dynamic = "force-dynamic";
 const tools = [
   {
     name: "reconcile_relay_vs_gads",
-    description:
-      "Cross-verify relay log vs Google Ads: how many leads did the relay attempt to send vs how many Google Ads actually received. Returns daily diff table with gap % and health status.",
+    description: "Cross-verify relay log vs Google Ads: how many leads did the relay attempt to send vs how many Google Ads actually received. Returns daily diff table with gap % and health status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -25,26 +24,17 @@ const tools = [
   },
   {
     name: "get_relay_health",
-    description:
-      "Snapshot of relay health: status breakdown (SUCCESS/EC_ONLY/FAIL/SKIP), GCLID source distribution (lsq/gcl_aw/none), attach rate, EC-only rate, and error rate for the last N days.",
+    description: "Snapshot of relay health: status breakdown (SUCCESS/EC_ONLY/FAIL/SKIP), GCLID source distribution, attach rate, EC-only rate, and error rate for the last N days.",
     inputSchema: {
       type: "object",
       properties: {
-        days: {
-          type: "number",
-          description: "Number of days to look back. Default 7.",
-          case "test_gads_connection":
-      return await testGadsConnection();
-
-    default: 7,
-        },
+        days: { type: "number", description: "Number of days to look back. Default 7.", default: 7 },
       },
     },
   },
   {
     name: "verify_batch_landed",
-    description:
-      "Verify whether relay batches of restatements landed in Google Ads. Checks BatchLog against Google Ads conversion counts on the batch date.",
+    description: "Verify whether relay batches of restatements landed in Google Ads. Checks BatchLog against Google Ads conversion counts on the batch date.",
     inputSchema: {
       type: "object",
       properties: {
@@ -55,8 +45,7 @@ const tools = [
   },
   {
     name: "get_coverage_by_source",
-    description:
-      "Shows which lead sources (stages) are reaching Google Ads and which have zero coverage. Flags ZERO_COVERAGE holes and HIGH_EC_ONLY sources.",
+    description: "Shows which lead sources (stages) are reaching Google Ads and which have zero coverage. Flags ZERO_COVERAGE holes and HIGH_EC_ONLY sources.",
     inputSchema: {
       type: "object",
       properties: {
@@ -68,51 +57,36 @@ const tools = [
   },
   {
     name: "get_signal_quality_trend",
-    description:
-      "Trend of signal quality over time: GCLID attach rate, cookie recovery rate, EC-only rate, error rate. Shows if signal quality is improving or degrading.",
+    description: "Trend of signal quality over time: GCLID attach rate, EC-only rate, error rate. Shows if signal quality is improving or degrading.",
     inputSchema: {
       type: "object",
       properties: {
         days: { type: "number", description: "Lookback window in days. Default 30.", default: 30 },
-        granularity: {
-          type: "string",
-          enum: ["daily", "weekly"],
-          description: "daily or weekly rollup. Default daily.",
-          case "test_gads_connection":
-      return await testGadsConnection();
-
-    default: "daily",
-        },
+        granularity: { type: "string", enum: ["daily", "weekly"], description: "daily or weekly rollup. Default daily.", default: "daily" },
       },
     },
   },
-  ,{
+  {
     name: "test_gads_connection",
     description: "Debug tool — tests OAuth and one GAQL call to verify Google Ads API connectivity.",
     inputSchema: { type: "object", properties: {} },
-  }
+  },
 ];
 
 async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
     case "reconcile_relay_vs_gads":
       return await reconcileRelayVsGads(args as { startDate: string; endDate: string });
-
     case "get_relay_health":
       return await getRelayHealth(args as { days?: number });
-
     case "verify_batch_landed":
       return await verifyBatchLanded(args as { batchId?: string; lastN?: number });
-
     case "get_coverage_by_source":
       return await getCoverageBySource(args as { startDate: string; endDate: string });
-
     case "get_signal_quality_trend":
       return await getSignalQualityTrend(args as { days?: number; granularity?: "daily" | "weekly" });
-
     case "test_gads_connection":
       return await testGadsConnection();
-
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -125,8 +99,7 @@ export async function POST(req: NextRequest) {
 
     if (method === "initialize") {
       return NextResponse.json({
-        jsonrpc: "2.0",
-        id,
+        jsonrpc: "2.0", id,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
@@ -144,36 +117,22 @@ export async function POST(req: NextRequest) {
     }
 
     if (method === "tools/call") {
-      const { name, arguments: args } = params as {
-        name: string;
-        arguments: Record<string, unknown>;
-      };
+      const { name, arguments: args } = params as { name: string; arguments: Record<string, unknown> };
       const result = await callTool(name, args ?? {});
       return NextResponse.json({
-        jsonrpc: "2.0",
-        id,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        },
+        jsonrpc: "2.0", id,
+        result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
       });
     }
 
     return NextResponse.json(
-      {
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32601, message: `Method not found: ${method}` },
-      },
+      { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } },
       { status: 404 }
     );
   } catch (err) {
     console.error("[ScaleX Recon MCP] Error:", err);
     return NextResponse.json(
-      {
-        jsonrpc: "2.0",
-        error: { code: -32603, message: String(err) },
-        id: null,
-      },
+      { jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null },
       { status: 500 }
     );
   }
