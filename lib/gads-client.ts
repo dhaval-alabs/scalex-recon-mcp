@@ -4,7 +4,7 @@ const DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN!;
 const REFRESH_TOKEN = process.env.GOOGLE_ADS_REFRESH_TOKEN!;
 const CLIENT_ID = process.env.GOOGLE_ADS_CLIENT_ID!;
 const CLIENT_SECRET = process.env.GOOGLE_ADS_CLIENT_SECRET!;
-const GADS_API_VERSION = "v19";
+const GADS_API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? "v23";
 
 async function getAccessToken(): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
