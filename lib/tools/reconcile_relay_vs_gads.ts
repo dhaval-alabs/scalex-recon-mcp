@@ -20,6 +20,7 @@ export async function reconcileRelayVsGads(params: {
   // Count relay by YYYY-MM-DD date
   const relayByDate = new Map<string, { attempted: number; success: number; ecOnly: number; failed: number }>();
   for (const r of relayRows) {
+    if (r.newStage !== "New Lead") continue; // only New Lead rows match lead_submitted_sclx
     const date = parseDate(r.timestamp);
     if (!date) continue;
     const existing = relayByDate.get(date) ?? { attempted: 0, success: 0, ecOnly: 0, failed: 0 };
