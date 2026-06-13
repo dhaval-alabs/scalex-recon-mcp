@@ -135,7 +135,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (method === "tools/list") {
-      return corsJson({ jsonrpc: "2.0", id, result: { tools } }, { headers: CORS_HEADERS });
+      return corsJson({ jsonrpc: "2.0", id, result: { tools } });
     }
 
     if (method === "tools/call") {
