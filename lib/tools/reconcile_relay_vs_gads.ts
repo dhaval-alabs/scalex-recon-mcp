@@ -1,19 +1,27 @@
 import { readRelayLogByDateRange } from "../sheets-client";
 import { getConversionsByDay } from "../gads-client";
 
+// Parse M/D/YYYY or YYYY-MM-DD to YYYY-MM-DD
+function parseDate(ts: string): string {
+  if (!ts) return "";
+  const mdy = ts.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (mdy) return `${mdy[3]}-${mdy[1].padStart(2,"0")}-${mdy[2].padStart(2,"0")}`;
+  return ts.substring(0, 10);
+}
+
 export async function reconcileRelayVsGads(params: {
   startDate: string;
   endDate: string;
 }) {
   const { startDate, endDate } = params;
 
-  // Pull relay log rows for date range
   const relayRows = await readRelayLogByDateRange(startDate, endDate);
 
-  // Count relay successes by date
+  // Count relay by YYYY-MM-DD date
   const relayByDate = new Map<string, { attempted: number; success: number; ecOnly: number; failed: number }>();
   for (const r of relayRows) {
-    const date = r.timestamp.substring(0, 10);
+    const date = parseDate(r.timestamp);
+    if (!date) continue;
     const existing = relayByDate.get(date) ?? { attempted: 0, success: 0, ecOnly: 0, failed: 0 };
     existing.attempted++;
     if (r.status === "SUCCESS") existing.success++;
@@ -22,19 +30,17 @@ export async function reconcileRelayVsGads(params: {
     relayByDate.set(date, existing);
   }
 
-  // Pull Google Ads conversions by date for _sclx actions
-  const gadsRows = await getConversionsByDay(startDate, endDate, ["sclx"]);
+  // Pull GAds lead_submitted conversions by day
+  const gadsRows = await getConversionsByDay(startDate, endDate, ["lead_submitted"]);
 
-  // Count GAds lead_submitted by date
   const gadsByDate = new Map<string, number>();
   for (const r of gadsRows) {
     if (r.conversionAction.includes("lead_submitted")) {
-      const existing = gadsByDate.get(r.date) ?? 0;
-      gadsByDate.set(r.date, existing + r.conversions);
+      gadsByDate.set(r.date, (gadsByDate.get(r.date) ?? 0) + r.conversions);
     }
   }
 
-  // Build diff table
+  // Build diff table — all dates in YYYY-MM-DD
   const allDates = Array.from(
     new Set([...relayByDate.keys(), ...gadsByDate.keys()])
   ).sort().reverse();
@@ -60,13 +66,10 @@ export async function reconcileRelayVsGads(params: {
     };
   });
 
-  // Summary
   const totalRelaySent = diffTable.reduce((s, r) => s + r.relay_total_sent, 0);
   const totalGads = diffTable.reduce((s, r) => s + r.gads_lead_submitted, 0);
   const totalGap = totalRelaySent - totalGads;
-  const overallGapPct = totalRelaySent > 0
-    ? ((totalGap / totalRelaySent) * 100).toFixed(1)
-    : "0.0";
+  const overallGapPct = totalRelaySent > 0 ? ((totalGap / totalRelaySent) * 100).toFixed(1) : "0.0";
 
   return {
     summary: {
