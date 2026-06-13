@@ -22,7 +22,13 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-async function gaql(query: string): Promise<any[]> {
+type Row = Record<string, unknown>;
+
+function pick(obj: unknown, path: string): unknown {
+  return path.split(".").reduce((acc, key) => (acc as Row)?.[key], obj);
+}
+
+async function gaql(query: string): Promise<Row[]> {
   const accessToken = await getAccessToken();
   const res = await fetch(
     `https://googleads.googleapis.com/${GADS_API_VERSION}/customers/${CUSTOMER_ID}/googleAds:search`,
@@ -37,8 +43,11 @@ async function gaql(query: string): Promise<any[]> {
       body: JSON.stringify({ query }),
     }
   );
-  const data = await res.json();
-  if (data.error) throw new Error(`Google Ads API error: ${JSON.stringify(data.error)}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Google Ads API error (HTTP ${res.status}): ${body.slice(0, 500)}`);
+  }
+  const data = await res.json() as { results?: Row[] };
   return data.results ?? [];
 }
 
@@ -49,6 +58,7 @@ export interface ConversionDayStat {
   conversionValue: number;
 }
 
+// Uses same pattern as working get_conversion_stats in alabs-mcp-server
 export async function getConversionsByDay(
   startDate: string,
   endDate: string,
@@ -59,22 +69,29 @@ export async function getConversionsByDay(
       segments.date,
       segments.conversion_action_name,
       metrics.conversions,
-      metrics.conversions_value
+      metrics.all_conversions
     FROM campaign
-    WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
-      AND campaign.status = 'ENABLED'
+    WHERE campaign.status = 'ENABLED'
+      AND segments.date BETWEEN '${startDate}' AND '${endDate}'
     ORDER BY segments.date DESC
   `);
 
-  const results: ConversionDayStat[] = rows.map((r: any) => ({
-    date: r.segments?.date ?? "",
-    conversionAction: r.segments?.conversionActionName ?? "",
-    conversions: parseFloat(r.metrics?.conversions ?? "0"),
-    conversionValue: parseFloat(r.metrics?.conversionsValue ?? "0"),
-  }));
+  // Aggregate by date + action name (rows come back per-campaign, need to sum)
+  const map = new Map<string, ConversionDayStat>();
+  for (const r of rows) {
+    const date = String(pick(r, "segments.date") ?? "");
+    const action = String(pick(r, "segments.conversionActionName") ?? "");
+    const conv = Number(pick(r, "metrics.conversions") ?? 0);
+    const key = `${date}||${action}`;
+    const existing = map.get(key) ?? { date, conversionAction: action, conversions: 0, conversionValue: 0 };
+    existing.conversions += conv;
+    map.set(key, existing);
+  }
+
+  let results = Array.from(map.values());
 
   if (actionNames && actionNames.length > 0) {
-    return results.filter((r) =>
+    results = results.filter((r) =>
       actionNames.some((n) => r.conversionAction.toLowerCase().includes(n.toLowerCase()))
     );
   }
@@ -84,17 +101,13 @@ export async function getConversionsByDay(
 export async function getConversionTotals(
   startDate: string,
   endDate: string
-): Promise<{ conversionAction: string; total: number; value: number }[]> {
+): Promise<{ conversionAction: string; total: number }[]> {
   const rows = await getConversionsByDay(startDate, endDate);
-  const map = new Map<string, { total: number; value: number }>();
+  const map = new Map<string, number>();
   for (const r of rows) {
-    const existing = map.get(r.conversionAction) ?? { total: 0, value: 0 };
-    map.set(r.conversionAction, {
-      total: existing.total + r.conversions,
-      value: existing.value + r.conversionValue,
-    });
+    map.set(r.conversionAction, (map.get(r.conversionAction) ?? 0) + r.conversions);
   }
   return Array.from(map.entries())
-    .map(([conversionAction, stats]) => ({ conversionAction, ...stats }))
+    .map(([conversionAction, total]) => ({ conversionAction, total }))
     .sort((a, b) => b.total - a.total);
 }
