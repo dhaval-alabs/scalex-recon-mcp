@@ -102,13 +102,21 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
 }
 
+function corsJson(data: unknown, init?: { status?: number }) {
+  const res = NextResponse.json(data, init);
+  res.headers.set("Access-Control-Allow-Origin", "*");
+  res.headers.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.headers.set("Access-Control-Allow-Headers", "Content-Type");
+  return res;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { method, id, params } = body;
 
     if (method === "initialize") {
-      return NextResponse.json({
+      return corsJson({
         jsonrpc: "2.0", id,
         result: {
           protocolVersion: "2024-11-05",
@@ -119,29 +127,29 @@ export async function POST(req: NextRequest) {
     }
 
     if (method === "notifications/initialized") {
-      return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+      const r204 = new NextResponse(null, { status: 204 }); r204.headers.set("Access-Control-Allow-Origin","*"); return r204;
     }
 
     if (method === "tools/list") {
-      return NextResponse.json({ jsonrpc: "2.0", id, result: { tools } }, { headers: CORS_HEADERS });
+      return corsJson({ jsonrpc: "2.0", id, result: { tools } }, { headers: CORS_HEADERS });
     }
 
     if (method === "tools/call") {
       const { name, arguments: args } = params as { name: string; arguments: Record<string, unknown> };
       const result = await callTool(name, args ?? {});
-      return NextResponse.json({
+      return corsJson({
         jsonrpc: "2.0", id,
         result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
       });
     }
 
-    return NextResponse.json(
+    return corsJson(
       { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } },
       { status: 404, headers: CORS_HEADERS }
     );
   } catch (err) {
     console.error("[ScaleX Recon MCP] Error:", err);
-    return NextResponse.json(
+    return corsJson(
       { jsonrpc: "2.0", error: { code: -32603, message: String(err) }, id: null },
       { status: 500, headers: CORS_HEADERS }
     );
