@@ -43,12 +43,16 @@ export interface RelayLogRow {
   message: string;    // col U
 }
 
+// Actual BatchLog columns (6 columns, A-F):
+// A=Timestamp, B=Status, C=Processed, D=Dropped, E=Failed, F=Message
+// NOTE: there is NO batchId column.
 export interface BatchLogRow {
   timestamp: string;
-  batchId: string;
-  rowsSent: number;
-  rowsAccepted: number;
   status: string;
+  processed: number;
+  dropped: number;
+  failed: number;
+  message: string;
 }
 
 // Parse M/D/YYYY HH:MM:SS or YYYY-MM-DD timestamps to YYYY-MM-DD
@@ -64,12 +68,29 @@ function parseRowDate(timestamp: string): string {
   return timestamp.substring(0, 10);
 }
 
-// Read raw rows from the Log tab
-export async function readRelayLog(limit = 10000): Promise<RelayLogRow[]> {
+// Get the actual number of rows in a sheet tab (so we never under-read).
+async function getSheetRowCount(sheetTitle: string): Promise<number> {
   const sheets = getSheetsClient();
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: RELAY_LOG_SPREADSHEET_ID,
+    fields: "sheets(properties(title,gridProperties(rowCount)))",
+  });
+  const tab = meta.data.sheets?.find(
+    (s) => s.properties?.title === sheetTitle
+  );
+  return tab?.properties?.gridProperties?.rowCount ?? 10000;
+}
+
+// Read raw rows from the Log tab.
+// FIX (Jun 16): previously hardcoded A2:U10001 which silently dropped the
+// most recent ~970 rows once the Log tab grew past 10,001 rows — that is what
+// made 14-16 Jun look like "zero New-Lead rows". Now we read to the real end.
+export async function readRelayLog(): Promise<RelayLogRow[]> {
+  const sheets = getSheetsClient();
+  const rowCount = await getSheetRowCount("Log");
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: RELAY_LOG_SPREADSHEET_ID,
-    range: `Log!A2:U${limit + 1}`,
+    range: `Log!A2:U${rowCount}`,
   });
 
   const rows = response.data.values ?? [];
@@ -97,7 +118,7 @@ export async function readRelayLogByDateRange(
   startDate: string,
   endDate: string
 ): Promise<RelayLogRow[]> {
-  const all = await readRelayLog(10000);
+  const all = await readRelayLog();
   return all.filter((r) => {
     if (!r.timestamp) return false;
     const d = parseRowDate(r.timestamp);
@@ -105,20 +126,30 @@ export async function readRelayLogByDateRange(
   });
 }
 
-// Read BatchLog tab
+// Read BatchLog tab.
+// FIX (Jun 16): corrected column mapping — actual columns are
+// A=Timestamp B=Status C=Processed D=Dropped E=Failed F=Message.
+// There is NO batchId column (the old mapping read Status as batchId
+// and Failed as status). Rows are returned NEWEST-FIRST so callers
+// verifying "the latest batch" get current data, not May legacy rows.
 export async function readBatchLog(limit = 100): Promise<BatchLogRow[]> {
   const sheets = getSheetsClient();
+  const rowCount = await getSheetRowCount("BatchLog");
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: RELAY_LOG_SPREADSHEET_ID,
-    range: `BatchLog!A2:Z${limit + 1}`,
+    range: `BatchLog!A2:F${rowCount}`,
   });
 
   const rows = response.data.values ?? [];
-  return rows.map((r) => ({
+  const mapped: BatchLogRow[] = rows.map((r) => ({
     timestamp: r[0] ?? "",
-    batchId: r[1] ?? "",
-    rowsSent: parseInt(r[2] ?? "0"),
-    rowsAccepted: parseInt(r[3] ?? "0"),
-    status: r[4] ?? "",
+    status:    r[1] ?? "",
+    processed: parseInt(r[2] ?? "0"),
+    dropped:   parseInt(r[3] ?? "0"),
+    failed:    parseInt(r[4] ?? "0"),
+    message:   r[5] ?? "",
   }));
+
+  // Newest first, capped at limit
+  return mapped.reverse().slice(0, limit);
 }
