@@ -44,8 +44,8 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        batchId: { type: "string", description: "Specific batch ID to verify. Omit for last N batches." },
-        lastN: { type: "number", description: "Number of recent batches to check. Default 5.", default: 5 },
+        date: { type: "string", description: "Optional date (YYYY-MM-DD) to verify batches for. Omit for the latest N batches. BatchLog has no per-batch ID, so verification is keyed by date." },
+        lastN: { type: "number", description: "Number of most-recent batches to check. Default 5.", default: 5 },
       },
     },
   },
@@ -86,7 +86,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "get_relay_health":
       return await getRelayHealth(args as { days?: number });
     case "verify_batch_landed":
-      return await verifyBatchLanded(args as { batchId?: string; lastN?: number });
+      return await verifyBatchLanded(args as { date?: string; lastN?: number });
     case "get_coverage_by_source":
       return await getCoverageBySource(args as { startDate: string; endDate: string });
     case "get_signal_quality_trend":
@@ -167,3 +167,4 @@ export async function GET() {
     tools: tools.map((t) => t.name),
   });
 }
+
