@@ -1,4 +1,5 @@
 import { readRelayLogByDateRange } from "../sheets-client";
+import { isA5Pending, isTrueSkip, isFailed } from "../status-classify";
 
 export async function getRelayHealth(params: { days?: number }) {
   const days = params.days ?? 7;
@@ -29,10 +30,16 @@ export async function getRelayHealth(params: { days?: number }) {
   const success = statusCounts.get("SUCCESS") ?? 0;
   const ecOnly = statusCounts.get("SUCCESS_EC_ONLY") ?? 0;
   const failed = Array.from(statusCounts.entries())
-    .filter(([k]) => k.includes("FAIL"))
+    .filter(([k]) => isFailed(k))
     .reduce((s, [, v]) => s + v, 0);
   const skipped = Array.from(statusCounts.entries())
-    .filter(([k]) => k.includes("SKIP"))
+    .filter(([k]) => isTrueSkip(k))
+    .reduce((s, [, v]) => s + v, 0);
+  // Leads correctly waiting for their day-5 push — not a failure, not a skip.
+  // Before this fix these rows counted in `total` but matched none of the
+  // buckets above, so percentages silently failed to sum to 100%.
+  const a5Pending = Array.from(statusCounts.entries())
+    .filter(([k]) => isA5Pending(k))
     .reduce((s, [, v]) => s + v, 0);
 
   // gclid+ec = has GCLID (from LSQ or cookie), ec_only = no GCLID
@@ -49,6 +56,11 @@ export async function getRelayHealth(params: { days?: number }) {
       SUCCESS_EC_ONLY: { count: ecOnly, pct: pct(ecOnly) },
       FAILED: { count: failed, pct: pct(failed) },
       SKIPPED: { count: skipped, pct: pct(skipped) },
+      A5_PENDING: {
+        count: a5Pending,
+        pct: pct(a5Pending),
+        note: "Leads correctly waiting for day-5 push — not a failure or skip.",
+      },
     },
     gclid_source_breakdown: Object.fromEntries(
       Array.from(gclidSourceCounts.entries()).map(([k, v]) => [
