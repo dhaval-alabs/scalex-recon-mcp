@@ -1,5 +1,6 @@
 import { readRelayLogByDateRange } from "../sheets-client";
 import { getConversionsByDay } from "../gads-client";
+import { isTooRecentForA5, A5_PUSH_DELAY_DAYS } from "../status-classify";
 
 // Parse M/D/YYYY or YYYY-MM-DD to YYYY-MM-DD
 function parseDate(ts: string): string {
@@ -63,18 +64,32 @@ export async function reconcileRelayVsGads(params: {
       gads_lead_submitted: gadsCount,
       gap,
       gap_pct: `${gapPct}%`,
-      status: Math.abs(gap) <= 2 ? "✅ OK" : gap > 0 ? "⚠️ RELAY_AHEAD" : "🔴 GADS_AHEAD",
+      status: isTooRecentForA5(date)
+        ? "⏳ TOO_RECENT_FOR_A5"
+        : Math.abs(gap) <= 2
+        ? "✅ OK"
+        : gap > 0
+        ? "⚠️ RELAY_AHEAD"
+        : "🔴 GADS_AHEAD",
     };
   });
 
-  const totalRelaySent = diffTable.reduce((s, r) => s + r.relay_total_sent, 0);
-  const totalGads = diffTable.reduce((s, r) => s + r.gads_lead_submitted, 0);
+  // Only dates that have actually cleared the A5 delay window are a fair
+  // test of whether relay-sent and Google-Ads-received line up. Recent dates
+  // are excluded from the health/gap total, not just individually labeled,
+  // or a run of fresh zero-vs-zero days would still average into "healthy"
+  // for the wrong reason and mask a real gap in the matured cohort.
+  const maturedRows = diffTable.filter((r) => r.status !== "⏳ TOO_RECENT_FOR_A5");
+  const totalRelaySent = maturedRows.reduce((s, r) => s + r.relay_total_sent, 0);
+  const totalGads = maturedRows.reduce((s, r) => s + r.gads_lead_submitted, 0);
   const totalGap = totalRelaySent - totalGads;
   const overallGapPct = totalRelaySent > 0 ? ((totalGap / totalRelaySent) * 100).toFixed(1) : "0.0";
 
   return {
     summary: {
       period: `${startDate} to ${endDate}`,
+      matured_dates_only_note: `Totals below only include dates ${A5_PUSH_DELAY_DAYS}+ days old — recent dates are still inside the A5 delay window and are reported per-day but excluded from the health verdict.`,
+      structural_caveat: "runDay5Push() writes outcomes to Firestore + BatchLog, not the Log tab. This tool joins on Log-tab origination date only, so it is structurally blind to a day-5 push that succeeds without a later webhook re-touching that same Log row. A clean result here is a lower bound, not proof every matured lead landed — cross-check volume with verify_batch_landed, which reads BatchLog directly.",
       relay_total_sent: totalRelaySent,
       gads_total_received: totalGads,
       total_gap: totalGap,
