@@ -56,15 +56,24 @@ export async function getRelayHealth(params: { days?: number }) {
   // already pushed). Every lead's FIRST push happens in runDay5Push(), which
   // writes to BatchLog + Firestore only. Without this join the tool reports
   // roughly half of real delivery.
-  const day5Runs = batchRows.filter(
-    (b) => classifyBatchRun(b.status, b.message) === "day5_push"
-  );
-  const excludedRuns = batchRows.filter(
-    (b) => classifyBatchRun(b.status, b.message) !== "day5_push"
-  );
+  const kindOf = (b: { status: string; message: string; processed: number; dropped: number; failed: number }) =>
+    classifyBatchRun(b.status, b.message, (b.processed || 0) + (b.dropped || 0) + (b.failed || 0));
+
+  const day5Runs = batchRows.filter((b) => kindOf(b) === "day5_push");
+  const excludedRuns = batchRows.filter((b) => kindOf(b) !== "day5_push");
   const day5Pushed = day5Runs.reduce((s, b) => s + (b.processed || 0), 0);
   const day5Failed = day5Runs.reduce((s, b) => s + (b.failed || 0), 0);
   const day5Dropped = day5Runs.reduce((s, b) => s + (b.dropped || 0), 0);
+
+  // Drops are NOT a homogeneous metric. They mix genuine expiry (past Google's
+  // import cutoff — real signal loss) with one-off housekeeping, and BatchLog
+  // cannot distinguish them. The A5 go-live backlog clear on 2026-07-20 alone
+  // dropped 2760 legacy-schema ledger docs in a single run, which swamps a
+  // 14-day total and reads as though thousands of leads are being lost.
+  // Surface the largest single run so an outlier is self-evident rather than
+  // buried in an aggregate.
+  const day5DropMaxRun = day5Runs.reduce((mx, b) => Math.max(mx, b.dropped || 0), 0);
+  const day5DroppedExOutlier = day5Dropped - day5DropMaxRun;
 
   const forwardPushed = success + ecOnly;
   const totalDelivered = forwardPushed + day5Pushed;
@@ -110,8 +119,15 @@ export async function getRelayHealth(params: { days?: number }) {
       day5_initial_pushes_batchlog: {
         total: day5Pushed,
         failed: day5Failed,
-        dropped_or_expired: day5Dropped,
         runs: day5Runs.length,
+        dropped_or_expired_total: day5Dropped,
+        dropped_largest_single_run: day5DropMaxRun,
+        dropped_excluding_largest_run: day5DroppedExOutlier,
+        dropped_note:
+          "Drops mix genuine expiry (past Google's import cutoff — real signal loss) with one-off " +
+          "housekeeping; BatchLog cannot distinguish them. If dropped_largest_single_run dominates " +
+          "the total it is almost certainly a backlog clear, not ongoing loss — read " +
+          "dropped_excluding_largest_run for the steady-state figure.",
       },
       total_delivered: totalDelivered,
       log_tab_visible_pct:
@@ -121,14 +137,15 @@ export async function getRelayHealth(params: { days?: number }) {
       batchlog_rows_excluded: {
         count: excludedRuns.length,
         by_kind: excludedRuns.reduce<Record<string, number>>((acc, b) => {
-          const k = classifyBatchRun(b.status, b.message);
+          const k = kindOf(b);
           acc[k] = (acc[k] ?? 0) + 1;
           return acc;
         }, {}),
         note:
-          "Non-day-5 BatchLog rows (retired legacy adjustment runs, pre-flip DISABLED rows, or " +
-          "unrecognised message formats). Surfaced deliberately: a non-zero 'unknown' count means " +
-          "the day-5 classifier may be missing rows and delivery totals would understate.",
+          "Non-day-5 BatchLog rows: retired legacy adjustment runs, pre-flip DISABLED rows, " +
+          "no_op (idle runs with zero activity — harmless, cannot affect totals), and unknown. " +
+          "Only a non-zero 'unknown' count matters: it means a row carrying real counts was not " +
+          "recognised, so delivery totals would understate.",
       },
       limitation:
         "BatchLog is aggregate (counts per run, no prospect IDs), so delivery TOTALS are correct " +
