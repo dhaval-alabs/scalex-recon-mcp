@@ -58,3 +58,37 @@ export function isTooRecentForA5(dateStr: string, asOf: Date = new Date()): bool
   const ageDays = (asOf.getTime() - rowDate.getTime()) / 86400000;
   return ageDays < A5_PUSH_DELAY_DAYS;
 }
+
+// ── BatchLog run classification (added 2026-08-03) ───────────────────────
+//
+// Addresses the structural limitation described in the header above. The
+// day-5 blind spot was correctly closed as harmless on 2026-07-20 when the
+// wave was ~1 push/day; measured 2026-08-03 it is 30-40/day, i.e. roughly
+// HALF of all conversions delivered to Google Ads (258 day-5 vs 245
+// forward-upgrade over 7 days). Tools reporting delivery volume must join
+// BatchLog in or they under-report by ~2x.
+//
+// BatchLog is a shared tab: it holds day-5 push runs AND the retired
+// runAdjustmentBatch runs (trigger removed 2026-07-20, function kept), plus
+// pre-flip "DISABLED" rows from before ENABLE_A5_FORWARD_ONLY was set true.
+// Only day-5 rows represent conversions delivered, so they must be isolated
+// before their `processed` counts are summed.
+//
+// ASSUMPTION WORTH VERIFYING: day-5 runs are identified by the "eligible:"
+// token, which runDay5Push() always writes into its BatchLog message
+// (`'eligible:' + trueEligibleCount + ' remaining:' + remaining`). If that
+// message format changes this classifier goes quietly wrong — which is why
+// callers should surface the excluded counts rather than silently dropping
+// unmatched rows.
+export type BatchRunKind = "day5_push" | "legacy_adjustment" | "disabled" | "unknown";
+
+export function classifyBatchRun(status: string, message: string): BatchRunKind {
+  const s = status || "";
+  const m = message || "";
+  if (m.includes("[LEGACY]")) return "legacy_adjustment";
+  if (s.toUpperCase().includes("DISABLED") || m.includes("ENABLE_A5_FORWARD_ONLY is false")) {
+    return "disabled";
+  }
+  if (m.includes("eligible:")) return "day5_push";
+  return "unknown";
+}
