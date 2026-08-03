@@ -153,3 +153,28 @@ export async function readBatchLog(limit = 100): Promise<BatchLogRow[]> {
   // Newest first, capped at limit
   return mapped.reverse().slice(0, limit);
 }
+
+// Read BatchLog rows falling inside a date range.
+//
+// WHY THIS EXISTS: runDay5Push() writes its outcomes ONLY to BatchLog and
+// Firestore — never to the Log tab. Since the A5 day-5 wave reached steady
+// state (~30-40 pushes/day, measured 2026-08-03) that is roughly HALF of all
+// conversions actually delivered to Google Ads. Any tool reading the Log tab
+// alone therefore reports well under half of real delivery.
+export async function readBatchLogByDateRange(
+  startDate: string,
+  endDate: string
+): Promise<BatchLogRow[]> {
+  // BatchLog accrues a handful of rows per day, not thousands — 2000 covers
+  // any plausible window.
+  const all = await readBatchLog(2000);
+  return all.filter((r) => {
+    if (!r.timestamp) return false;
+    const d = parseRowDate(r.timestamp);
+    return d >= startDate && d <= endDate;
+  });
+}
+
+// Exported so tools can bucket rows by day without re-implementing the
+// M/D/YYYY parsing (and drifting from it).
+export { parseRowDate };
