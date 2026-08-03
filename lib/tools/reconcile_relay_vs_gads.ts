@@ -80,6 +80,13 @@ export async function reconcileRelayVsGads(params: {
   // or a run of fresh zero-vs-zero days would still average into "healthy"
   // for the wrong reason and mask a real gap in the matured cohort.
   const maturedRows = diffTable.filter((r) => r.status !== "⏳ TOO_RECENT_FOR_A5");
+
+  // This tool takes an explicit date range (there is no default lookback to
+  // widen), so guarding SAMPLE SIZE is what actually prevents a verdict being
+  // issued on too little matured data. A 7-day range leaves only ~2 usable
+  // days once the A5 window is excluded — not enough to call either way.
+  const MIN_MATURED_DAYS = 7;
+  const insufficientSample = maturedRows.length < MIN_MATURED_DAYS;
   const totalRelaySent = maturedRows.reduce((s, r) => s + r.relay_total_sent, 0);
   const totalGads = maturedRows.reduce((s, r) => s + r.gads_lead_submitted, 0);
   const totalGap = totalRelaySent - totalGads;
@@ -94,7 +101,20 @@ export async function reconcileRelayVsGads(params: {
       gads_total_received: totalGads,
       total_gap: totalGap,
       gap_pct: `${overallGapPct}%`,
-      health: Math.abs(totalGap) / Math.max(totalRelaySent, 1) < 0.05 ? "✅ HEALTHY" : "⚠️ NEEDS_REVIEW",
+      matured_days_used: maturedRows.length,
+      health: insufficientSample
+        ? "❔ INSUFFICIENT_MATURED_SAMPLE"
+        : Math.abs(totalGap) / Math.max(totalRelaySent, 1) < 0.05
+        ? "✅ HEALTHY"
+        : "⚠️ NEEDS_REVIEW",
+      ...(insufficientSample
+        ? {
+            sample_warning:
+              `Only ${maturedRows.length} matured day(s) in this range (need ${MIN_MATURED_DAYS}+). ` +
+              `The A5 ${A5_PUSH_DELAY_DAYS}-day delay consumes the most recent dates, so request a range of ` +
+              `at least ${MIN_MATURED_DAYS + A5_PUSH_DELAY_DAYS} days to get a verdict.`,
+          }
+        : {}),
     },
     daily_diff: diffTable,
   };
