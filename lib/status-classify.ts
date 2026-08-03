@@ -80,9 +80,24 @@ export function isTooRecentForA5(dateStr: string, asOf: Date = new Date()): bool
 // message format changes this classifier goes quietly wrong — which is why
 // callers should surface the excluded counts rather than silently dropping
 // unmatched rows.
-export type BatchRunKind = "day5_push" | "legacy_adjustment" | "disabled" | "unknown";
+export type BatchRunKind =
+  | "day5_push"
+  | "legacy_adjustment"
+  | "disabled"
+  | "no_op"
+  | "unknown";
 
-export function classifyBatchRun(status: string, message: string): BatchRunKind {
+// `activity` = processed + dropped + failed for the run. Rows with zero
+// activity cannot affect any total, so they are classified "no_op" rather
+// than "unknown" — otherwise the unknown-count alarm fires permanently on
+// harmless idle runs and stops meaning anything. Observed case: runDay5Push()
+// on 7/21-7/23 found nothing eligible and wrote NO message column at all
+// (5 cells, not 6), so the "eligible:" token cannot match.
+export function classifyBatchRun(
+  status: string,
+  message: string,
+  activity = 1
+): BatchRunKind {
   const s = status || "";
   const m = message || "";
   if (m.includes("[LEGACY]")) return "legacy_adjustment";
@@ -90,5 +105,6 @@ export function classifyBatchRun(status: string, message: string): BatchRunKind 
     return "disabled";
   }
   if (m.includes("eligible:")) return "day5_push";
+  if (activity === 0) return "no_op";
   return "unknown";
 }
