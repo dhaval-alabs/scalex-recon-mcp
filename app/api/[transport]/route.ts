@@ -34,7 +34,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        days: { type: "number", description: "Number of days to look back. Default 7.", default: 7 },
+        days: { type: "number", description: "Number of days to look back. Default 14 — must exceed the A5 5-day delay to contain a meaningful matured sample.", default: 14 },
       },
     },
   },
@@ -167,4 +167,3 @@ export async function GET() {
     tools: tools.map((t) => t.name),
   });
 }
-
