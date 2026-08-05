@@ -186,20 +186,29 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
   // RELAY_AHEAD on DISQUALIFIED cancel a large GADS_AHEAD elsewhere and report
   // ✅ HEALTHY at -4.8% while both sides were badly out. Opposite-signed gaps
   // in different buckets are different problems and must not net off.
-  const byBucket = new Map<string, { pushed: number; received: number; cells: number }>();
+  // Split by bucket AND by A5 era. DISQUALIFIED is comparable on both sides of
+  // the flip, and its two sides run in OPPOSITE directions — pre-A5 Google is
+  // ~3.5x ahead, post-A5 the relay is ~5.4x ahead, with the sign flipping on
+  // 2026-07-21. Averaging them produced -36% and concealed both. Never
+  // aggregate across a known regime change.
+  const byKey = new Map<string, { pushed: number; received: number; cells: number }>();
   for (const r of matured) {
-    const b = byBucket.get(r.bucket) ?? { pushed: 0, received: 0, cells: 0 };
+    const era = r.date < A5_GOLIVE ? "pre_a5" : "post_a5";
+    const k = `${r.bucket}||${era}`;
+    const b = byKey.get(k) ?? { pushed: 0, received: 0, cells: 0 };
     b.pushed += r.relay_pushed_immediately;
     b.received += r.gads_received;
     b.cells++;
-    byBucket.set(r.bucket, b);
+    byKey.set(k, b);
   }
-  const bucketVerdicts = Array.from(byBucket.entries())
-    .map(([bucket, b]) => {
+  const bucketVerdicts = Array.from(byKey.entries())
+    .map(([k, b]) => {
+      const [bucket, era] = k.split("||");
       const g = b.pushed - b.received;
       const rate = b.pushed > 0 ? Math.abs(g) / b.pushed : 0;
       return {
         bucket,
+        era,
         comparable_cells: b.cells,
         relay_pushed: b.pushed,
         gads_received: b.received,
@@ -242,7 +251,17 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
         "day-5 volume invisible to the Log, so an immediate-only count is a lower bound there and " +
         "Google being ahead is expected, not a fault. Those cells are marked ◐ DAY5_ALSO_DELIVERS " +
         "and excluded from every verdict.",
-      per_bucket: bucketVerdicts,
+      per_bucket_per_era: bucketVerdicts,
+      known_anomalies:
+        "DISQUALIFIED runs in opposite directions either side of A5 go-live and neither direction " +
+        "is explained. PRE-A5: Google records several times what the relay pushed — something other " +
+        "than the immediate path was writing disqualified conversions, and it stops at 2026-07-20 " +
+        "(the legacy runAdjustmentBatch trigger was retired that day, but restatements adjust " +
+        "existing conversions rather than create them, so that explanation is unconfirmed). " +
+        "POST-A5: the relay pushes several times what Google records, on near-100% ec_only traffic, " +
+        "consistent with EC identifier match failure but not demonstrated. Neither is resolvable " +
+        "from the Log — both need offline_conversion_upload_conversion_action_summary (Layer 2), " +
+        "which separates 'Google rejected the upload' from 'Google accepted it and did not match'.",
       immediate_leg: {
         relay_pushed: totalPushed,
         gads_received: totalReceived,
