@@ -45,6 +45,20 @@ const STAGE_TO_BUCKET: Record<string, string> = {
   Cold: "DISQUALIFIED",
 };
 
+// A5 went live 2026-07-20. Before that every push was immediate, so the Log
+// records the whole picture and all buckets are comparable per-date. After it,
+// only DISQUALIFIED remains purely immediate — a disqualification fires at
+// stage-change time and is never deferred. LEAD_SUBMITTED / QUALIFIED /
+// SIGNUP / CONVERTED all additionally receive day-5 volume that the Log cannot
+// see, so an immediate-only count is a LOWER BOUND for them and Google will
+// legitimately be ahead. Comparing those per-date produces false GADS_AHEAD.
+const A5_GOLIVE = "2026-07-20";
+
+function isComparable(date: string, bucket: string): boolean {
+  if (date < A5_GOLIVE) return true;
+  return bucket === "DISQUALIFIED";
+}
+
 const BUCKET_TO_ACTION: Record<string, string> = {
   LEAD_SUBMITTED: "lead_submitted",
   SIGNUP: "signup",
@@ -143,8 +157,11 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
         relay_failed: cell.failed,
         gads_received: received,
         gap,
+        comparable: isComparable(date, bucket),
         status: isTooRecentForA5(date)
           ? "⏳ TOO_RECENT_FOR_A5"
+          : !isComparable(date, bucket)
+          ? "◐ DAY5_ALSO_DELIVERS"
           : cell.pushed === 0 && received === 0
           ? "➖ NO_VOLUME"
           : Math.abs(gap) <= 2
@@ -157,10 +174,43 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
     .sort((a, b) => (a.date === b.date ? a.bucket.localeCompare(b.bucket) : b.date.localeCompare(a.date)));
 
   const matured = perBucket.filter(
-    (r) => r.status !== "⏳ TOO_RECENT_FOR_A5" && r.status !== "➖ NO_VOLUME"
+    (r) =>
+      r.status !== "⏳ TOO_RECENT_FOR_A5" &&
+      r.status !== "➖ NO_VOLUME" &&
+      r.status !== "◐ DAY5_ALSO_DELIVERS"
   );
   const MIN_MATURED_CELLS = 7;
   const insufficient = matured.length < MIN_MATURED_CELLS;
+
+  // PER-BUCKET, never one cross-bucket total. A single aggregate let a large
+  // RELAY_AHEAD on DISQUALIFIED cancel a large GADS_AHEAD elsewhere and report
+  // ✅ HEALTHY at -4.8% while both sides were badly out. Opposite-signed gaps
+  // in different buckets are different problems and must not net off.
+  const byBucket = new Map<string, { pushed: number; received: number; cells: number }>();
+  for (const r of matured) {
+    const b = byBucket.get(r.bucket) ?? { pushed: 0, received: 0, cells: 0 };
+    b.pushed += r.relay_pushed_immediately;
+    b.received += r.gads_received;
+    b.cells++;
+    byBucket.set(r.bucket, b);
+  }
+  const bucketVerdicts = Array.from(byBucket.entries())
+    .map(([bucket, b]) => {
+      const g = b.pushed - b.received;
+      const rate = b.pushed > 0 ? Math.abs(g) / b.pushed : 0;
+      return {
+        bucket,
+        comparable_cells: b.cells,
+        relay_pushed: b.pushed,
+        gads_received: b.received,
+        gap: g,
+        gap_pct: b.pushed > 0 ? `${((g / b.pushed) * 100).toFixed(1)}%` : "n/a",
+        verdict: rate < 0.05 ? "✅ HEALTHY" : g > 0 ? "⚠️ RELAY_AHEAD" : "🔴 GADS_AHEAD",
+      };
+    })
+    .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap));
+
+  const worst = bucketVerdicts.find((b) => b.verdict !== "✅ HEALTHY");
   const totalPushed = matured.reduce((s, r) => s + r.relay_pushed_immediately, 0);
   const totalReceived = matured.reduce((s, r) => s + r.gads_received, 0);
   const gap = totalPushed - totalReceived;
@@ -186,17 +236,27 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
         "The per-date verdict covers IMMEDIATE pushes only (forward upgrades and disqualifications), " +
         "which the Log records definitively. The day-5 leg is reported as window volume below and is " +
         "deliberately EXCLUDED from the verdict — see day5_why_not_per_date.",
+      comparability:
+        "Pre-2026-07-20 every push was immediate, so all buckets are comparable per-date. " +
+        "Post-A5 only DISQUALIFIED is (it never defers to day 5); the other buckets also receive " +
+        "day-5 volume invisible to the Log, so an immediate-only count is a lower bound there and " +
+        "Google being ahead is expected, not a fault. Those cells are marked ◐ DAY5_ALSO_DELIVERS " +
+        "and excluded from every verdict.",
+      per_bucket: bucketVerdicts,
       immediate_leg: {
         relay_pushed: totalPushed,
         gads_received: totalReceived,
         gap,
         gap_pct: totalPushed > 0 ? `${((gap / totalPushed) * 100).toFixed(1)}%` : "0.0%",
+        cross_bucket_total_warning:
+          "This total spans buckets and can hide opposite-signed gaps cancelling out — read " +
+          "per_bucket above, not this. Retained only for continuity.",
         matured_cells_used: matured.length,
         health: insufficient
           ? "❔ INSUFFICIENT_MATURED_SAMPLE"
-          : Math.abs(gap) / Math.max(totalPushed, 1) < 0.05
-          ? "✅ HEALTHY"
-          : "⚠️ NEEDS_REVIEW",
+          : worst
+          ? `⚠️ NEEDS_REVIEW — worst bucket ${worst.bucket} at ${worst.gap_pct}`
+          : "✅ HEALTHY",
         ...(insufficient
           ? {
               sample_warning:
