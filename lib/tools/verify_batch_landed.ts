@@ -1,5 +1,6 @@
 import { readBatchLog } from "../sheets-client";
 import { getConversionsByDay } from "../gads-client";
+import { A5_PUSH_DELAY_DAYS } from "../status-classify";
 
 // Parse M/D/YYYY or YYYY-MM-DD to YYYY-MM-DD
 function toIso(ts: string): string {
@@ -44,7 +45,31 @@ export async function verifyBatchLanded(params: {
     targetBatches.map(async (batch) => {
       try {
         const isoDate = toIso(batch.timestamp);
-        const gadsRows = await getConversionsByDay(isoDate, isoDate, ["sclx"]);
+
+        // ── DATE OFFSET ────────────────────────────────────────────────────
+        // This tool used to query Google for the SAME date as the batch push
+        // and got zeros on every batch, which read as a landing failure.
+        // Switching gads-client to the conversion-date axis does NOT by itself
+        // fix that, because the two dates are different events:
+        //
+        //   runDay5Push() executes on date D, but uploads
+        //   conversion_date_time = current_stage_changed_at || created_at,
+        //   i.e. roughly D - A5_PUSH_DELAY_DAYS.
+        //
+        // So on the conversion-date axis Google files that push ~5 days BEFORE
+        // the batch ran. Querying date D returns nothing. Look back instead,
+        // with a buffer because leads that changed stage carry a later
+        // conversion date than their creation date.
+        const BUFFER_DAYS = 2;
+        const windowEnd = isoDate;
+        const windowStart = new Date(
+          new Date(`${isoDate}T00:00:00Z`).getTime() -
+            (A5_PUSH_DELAY_DAYS + BUFFER_DAYS) * 86400000
+        )
+          .toISOString()
+          .substring(0, 10);
+
+        const gadsRows = await getConversionsByDay(windowStart, windowEnd, ["sclx"]);
         const gadsTotal = gadsRows.reduce((s, r) => s + r.conversions, 0);
         const adjustmentRows = gadsRows.filter(
           (r) =>
@@ -59,17 +84,26 @@ export async function verifyBatchLanded(params: {
           dropped: batch.dropped,
           failed: batch.failed,
           message: batch.message ? batch.message.substring(0, 160) : "",
-          gads_sclx_conversions_on_date: gadsTotal,
+          gads_conversion_date_window: `${windowStart} to ${windowEnd}`,
+          gads_sclx_conversions_in_window: gadsTotal,
           gads_actions: adjustmentRows.map((r) => ({
             action: r.conversionAction,
             count: r.conversions,
           })),
-          landed:
-            batch.processed > 0 && batch.failed === 0 && gadsTotal > 0
-              ? "✅ LIKELY_LANDED"
-              : batch.failed > 0
+          batch_health:
+            batch.failed > 0
               ? "🔴 HAD_FAILURES"
-              : "⚠️ VERIFY_MANUALLY",
+              : batch.processed > 0
+              ? "✅ RAN_CLEAN"
+              : "➖ NOTHING_ELIGIBLE",
+          gads_volume_present: gadsTotal > 0 ? "✅ YES" : "⚠️ NONE_IN_WINDOW",
+          interpretation:
+            "batch_health comes from BatchLog and is authoritative for whether the run itself " +
+            "succeeded. gads_volume_present is CONTEXT ONLY — the window spans several days and " +
+            "several conversion actions, so it cannot confirm that this specific batch's rows " +
+            "landed. BatchLog carries no prospect IDs, and Google reports aggregates with no " +
+            "per-record match field, so per-batch confirmation is not obtainable from either " +
+            "side. Treat a clean batch plus non-zero window volume as consistent, not as proof.",
         };
       } catch (err) {
         return {
