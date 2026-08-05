@@ -58,6 +58,42 @@ export interface ConversionDayStat {
   conversionValue: number;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// DATE AXIS — this is the single most important thing about this function.
+//
+// Google Ads files an uploaded offline conversion under the date of the
+// ORIGINAL CLICK, not the date we uploaded it. `metrics.conversions` with
+// `segments.date` is therefore CLICK-DATED, which made every relay-vs-Google
+// comparison structurally invalid: our relay rows are keyed on the stage-change
+// moment, Google's were keyed on a click that could be weeks earlier.
+// Confirmed with hard dates: an enrolment pushed 2026-07-22 filed under click
+// date 2026-07-10; one pushed 07-13 filed under 06-30.
+//
+// FIX: select a *_by_conversion_date metric. When one is selected alongside
+// `segments.date`, `segments.date` changes meaning to the CONVERSION date —
+// which for offline imports is the `conversion_date_time` we upload. That
+// aligns Google's axis with our own dates in a single query.
+//
+// `all_conversions_by_conversion_date` (not `conversions_by_conversion_date`)
+// because imported offline conversions frequently land in all_conversions —
+// Secondary actions are excluded from `metrics.conversions` entirely.
+//
+// Google does NOT support conversions by UPLOAD date at all. That avenue is
+// closed; do not go looking for it again.
+//
+// KNOWN HAZARD: on some resources this field is silently omitted — no error,
+// no value. A missing field would read as zero and look like a delivery
+// failure. Rather than trusting it, this function DETECTS the omission and
+// throws (see assertion below), so a silent omission becomes a loud failure.
+//
+// Also note: FROM customer, not FROM campaign. `FROM campaign` requires
+// `campaign.status = 'ENABLED'` or it drops rows, which silently discarded
+// conversions correctly attributed to since-paused campaigns. This function
+// aggregates account-wide by action name, so it never needed campaign rows.
+// ─────────────────────────────────────────────────────────────────────────
+
+const BY_CONV_DATE_FIELD = "metrics.allConversionsByConversionDate";
+
 export async function getConversionsByDay(
   startDate: string,
   endDate: string,
@@ -67,22 +103,39 @@ export async function getConversionsByDay(
     SELECT
       segments.date,
       segments.conversion_action_name,
-      metrics.conversions,
-      metrics.all_conversions
-    FROM campaign
-    WHERE campaign.status = 'ENABLED'
-      AND segments.date BETWEEN '${startDate}' AND '${endDate}'
+      metrics.all_conversions_by_conversion_date,
+      metrics.all_conversions_value_by_conversion_date
+    FROM customer
+    WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'
     ORDER BY segments.date DESC
   `);
+
+  // Detect silent field omission: if rows came back but NONE of them carry the
+  // by-conversion-date field, the API dropped it and every figure below would
+  // be a false zero. Fail loudly instead.
+  if (rows.length > 0) {
+    const present = rows.filter((r) => pick(r, BY_CONV_DATE_FIELD) !== undefined).length;
+    if (present === 0) {
+      throw new Error(
+        `Google Ads returned ${rows.length} rows but omitted ${BY_CONV_DATE_FIELD} on all of them ` +
+          `(API ${API_VER}). This field is silently unsupported on some resources — the numbers would ` +
+          `have read as zeros. Validate the query in Google's Query Validator for this API version ` +
+          `before trusting any result from this tool.`
+      );
+    }
+  }
 
   const map = new Map<string, ConversionDayStat>();
   for (const r of rows) {
     const date = String(pick(r, "segments.date") ?? "");
     const action = String(pick(r, "segments.conversionActionName") ?? "");
-    const conv = Number(pick(r, "metrics.conversions") ?? 0);
+    const conv = Number(pick(r, BY_CONV_DATE_FIELD) ?? 0);
+    const val = Number(pick(r, "metrics.allConversionsValueByConversionDate") ?? 0);
     const key = `${date}||${action}`;
-    const existing = map.get(key) ?? { date, conversionAction: action, conversions: 0, conversionValue: 0 };
+    const existing =
+      map.get(key) ?? { date, conversionAction: action, conversions: 0, conversionValue: 0 };
     existing.conversions += conv;
+    existing.conversionValue += val;
     map.set(key, existing);
   }
 
