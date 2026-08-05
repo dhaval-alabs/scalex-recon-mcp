@@ -86,6 +86,24 @@ export async function getRelayHealth(params: { days?: number }) {
   const pushAttempts = totalDelivered + totalFailures;
   const deliveryErrorRate = pushAttempts > 0 ? totalFailures / pushAttempts : 0;
 
+  // ── DROPS MUST MOVE THE VERDICT ──────────────────────────────────────────
+  // A lead dropped past Google's import cutoff is PERMANENT signal loss —
+  // strictly worse than a failure, which gets retried on the next sweep. Yet
+  // drops appeared nowhere in the health calculation.
+  //
+  // This gates the cutoff tightening (GCLID_IMPORT_CUTOFF_DAYS 90→75,
+  // EC_ONLY 63→58): that change RAISES expiry drops by design, so without
+  // this the verdict would stay green while real loss climbed.
+  //
+  // Uses dropped-excluding-largest-run, so a one-off backlog clear (the 7/20
+  // A5 go-live dropped 2760 legacy ledger docs in a single run) cannot trip
+  // the alarm, while genuine day-to-day expiry does.
+  const lossDenominator = totalDelivered + totalFailures + day5DroppedExOutlier;
+  const dropLossRate = lossDenominator > 0 ? day5DroppedExOutlier / lossDenominator : 0;
+  // Deliberately tighter than the error threshold: a drop is unrecoverable
+  // where a failure is not.
+  const DROP_LOSS_THRESHOLD = 0.02;
+
   return {
     period: `Last ${days} days (${startDate} to ${endDate})`,
     total_rows: total,
@@ -163,9 +181,27 @@ export async function getRelayHealth(params: { days?: number }) {
       skip_rate: pct(skipped),
       error_rate_legacy_denominator: pct(failed),
     },
-    health: deliveryErrorRate < 0.05 ? "✅ HEALTHY" : "⚠️ NEEDS_REVIEW",
+    loss: {
+      note:
+        "Permanent signal loss — leads that expired past Google's import cutoff and can never be " +
+        "uploaded. Tracked separately from failures because a failure is retried on the next day-5 " +
+        "sweep and a drop is not.",
+      permanent_drops: day5DroppedExOutlier,
+      drop_loss_rate: `${(dropLossRate * 100).toFixed(2)}%`,
+      threshold: `${(DROP_LOSS_THRESHOLD * 100).toFixed(0)}%`,
+      excluded_outlier_run: day5DropMaxRun,
+      gates:
+        "Tightening GCLID_IMPORT_CUTOFF_DAYS (90→75) and EC_ONLY_IMPORT_CUTOFF_DAYS (63→58) will " +
+        "increase this by design. Watch this figure across that change, not just the error rate.",
+    },
+    health:
+      deliveryErrorRate < 0.05 && dropLossRate < DROP_LOSS_THRESHOLD
+        ? "✅ HEALTHY"
+        : "⚠️ NEEDS_REVIEW",
     health_basis:
-      "Based on delivery_error_rate (failures / actual push attempts across both legs). The " +
+      "Based on delivery_error_rate (<5%) AND drop_loss_rate (<2%). Drops previously appeared " +
+      "nowhere in the verdict, so permanent expiry loss could rise without the status changing. " +
+      "Failures are divided by actual push attempts across both legs. The " +
       "previous verdict divided failures by ALL relay log rows — including ~two thirds " +
       "SKIP_NON_PPC leads that were never upload candidates — and could not see day-5 failures at all.",
   };
