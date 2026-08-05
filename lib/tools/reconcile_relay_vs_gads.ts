@@ -2,198 +2,223 @@ import { readRelayLogByDateRange, readBatchLogByDateRange, parseRowDate } from "
 import { getConversionsByDay } from "../gads-client";
 import { isTooRecentForA5, A5_PUSH_DELAY_DAYS, isA5Pending, classifyBatchRun } from "../status-classify";
 
-// parseRowDate is imported from sheets-client rather than redefined here — this
-// file previously carried its own identical copy, which is exactly the drift
-// the shared export exists to prevent.
+// parseRowDate comes from sheets-client rather than being redefined here — this
+// file used to carry its own identical copy, which is the drift the shared
+// export exists to prevent.
 
-export async function reconcileRelayVsGads(params: {
-  startDate: string;
-  endDate: string;
-}) {
+// ── WHAT THIS TOOL CAN AND CANNOT PROVE ───────────────────────────────────
+//
+// Two legs deliver conversions to Google Ads, and only ONE is per-date
+// verifiable from the Log tab:
+//
+// 1. IMMEDIATE pushes (forward upgrades, disqualifications). The Log records
+//    the outcome and the conversion_date_time is "now", so row date == Google
+//    conversion date. Fully reconcilable per date and per bucket.
+//
+// 2. DAY-5 initial pushes. runDay5Push() writes to BatchLog/Firestore only,
+//    and uploads whichever bucket the lead occupies AT day 5 — not the bucket
+//    implied by the ledger row we can see. Post-A5, only 423 of 757 ledger
+//    rows targeted LEAD_SUBMITTED; 334 were destined for qualified/signup/
+//    converted. Worse, when a lead moves stage several times during its hold,
+//    only the LAST ledger state actually pushes, and the Log cannot tell us
+//    which row that was.
+//
+// An earlier version of this tool counted every ledger row as an expected
+// lead_submitted, which produced a spurious 25% RELAY_AHEAD gap that looked
+// like signal loss and was not. Rather than build a more elaborate guess, the
+// day-5 leg is now reconciled at WINDOW-VOLUME level only, and excluded from
+// the per-date verdict. Per-date day-5 attribution requires Firestore.
+
+const STAGE_TO_BUCKET: Record<string, string> = {
+  "New Lead": "LEAD_SUBMITTED",
+  "Future Interest": "SIGNUP",
+  "ML-Enquiry": "SIGNUP",
+  Enquiry: "QUALIFIED",
+  "Re-Enquiry": "QUALIFIED",
+  Hot: "QUALIFIED",
+  Warm: "QUALIFIED",
+  "Priority-Call": "QUALIFIED",
+  Enrolled: "CONVERTED",
+  Junk: "DISQUALIFIED",
+  "Not Interested": "DISQUALIFIED",
+  Disqualified: "DISQUALIFIED",
+  Cold: "DISQUALIFIED",
+};
+
+const BUCKET_TO_ACTION: Record<string, string> = {
+  LEAD_SUBMITTED: "lead_submitted",
+  SIGNUP: "signup",
+  QUALIFIED: "qualified",
+  CONVERTED: "converted",
+  DISQUALIFIED: "disqualified",
+};
+
+export async function reconcileRelayVsGads(params: { startDate: string; endDate: string }) {
   const { startDate, endDate } = params;
 
-  const relayRows = await readRelayLogByDateRange(startDate, endDate);
+  const [relayRows, batchRows, gadsRows] = await Promise.all([
+    readRelayLogByDateRange(startDate, endDate),
+    readBatchLogByDateRange(startDate, endDate),
+    getConversionsByDay(startDate, endDate, ["sclx"]),
+  ]);
 
-  // ── NUMERATOR ────────────────────────────────────────────────────────────
-  // This was returning ZERO for every post-A5 date, and issuing red verdicts
-  // (and worse, ✅ OK on low-volume days where the gap fell inside tolerance)
-  // against an empty relay side.
-  //
-  // Why it was zero: post-A5 a "New Lead" webhook writes A5_LEDGER_ONLY or
-  // A5_PENDING_LEDGER, never SUCCESS — the first push happens later in
-  // runDay5Push(). The old code counted only SUCCESS/SUCCESS_EC_ONLY, so the
-  // numerator was zero by construction from 2026-07-20 onward.
-  //
-  // Why the Log tab is still the right place to join: runDay5Push() uploads
-  // conversion_date_time = current_stage_changed_at || created_at — the
-  // ORIGINAL stage-change moment, not the push moment. Now that Google is
-  // queried on the conversion-date axis, it files that push under the same
-  // date as this Log row. So the Log's DATES were always correct; only the
-  // status filter was wrong.
-  //
-  // DEDUPE: one prospect can emit several "New Lead" rows minutes apart (the
-  // same GCLID and hashed identifiers repeating). Google's Count=One setting
-  // records one conversion per click, so counting rows overstates the
-  // numerator. Dedupe per date on prospectId, falling back to gclid+email.
-  const relayByDate = new Map<
-    string,
-    {
-      attempted: number;
-      pushedNow: number;
-      awaitingDay5: number;
-      failed: number;
-      seen: Set<string>;
-      dupes: number;
-    }
-  >();
+  // ── Leg 1: immediate pushes, keyed (date, bucket) ───────────────────────
+  type Cell = { pushed: number; failed: number; seen: Set<string>; dupes: number };
+  const immediate = new Map<string, Cell>();
+  const awaitingByDate = new Map<string, number>();
+
   for (const r of relayRows) {
-    if (r.newStage !== "New Lead") continue; // only New Lead rows map to lead_submitted_sclx
     const date = parseRowDate(r.timestamp);
     if (!date) continue;
-    const existing =
-      relayByDate.get(date) ??
-      { attempted: 0, pushedNow: 0, awaitingDay5: 0, failed: 0, seen: new Set<string>(), dupes: 0 };
-    existing.attempted++;
 
-    const identity = r.prospectId || `${r.gclid}|${r.email}` || "";
-    if (identity && existing.seen.has(identity)) {
-      existing.dupes++;
-      relayByDate.set(date, existing);
+    if (isA5Pending(r.status)) {
+      awaitingByDate.set(date, (awaitingByDate.get(date) ?? 0) + 1);
       continue;
     }
-    if (identity) existing.seen.add(identity);
 
-    if (r.status === "SUCCESS" || r.status === "SUCCESS_EC_ONLY") existing.pushedNow++;
-    else if (isA5Pending(r.status)) existing.awaitingDay5++;
-    else if (r.status?.includes("FAIL")) existing.failed++;
-    relayByDate.set(date, existing);
-  }
+    const isPush = r.status === "SUCCESS" || r.status === "SUCCESS_EC_ONLY";
+    const isFail = !!r.status && r.status.includes("FAIL");
+    if (!isPush && !isFail) continue;
 
-  // Independent volume cross-check: day-5 pushes actually executed in this
-  // window, straight from BatchLog. NOTE this is keyed on PUSH date, ~5 days
-  // after the conversion date it carries, so it is a total-volume sanity check
-  // only — deliberately not joined per-date.
-  const batchRows = await readBatchLogByDateRange(startDate, endDate);
-  const day5Runs = batchRows.filter(
-    (b) =>
-      classifyBatchRun(
-        b.status,
-        b.message,
-        (b.processed || 0) + (b.dropped || 0) + (b.failed || 0)
-      ) === "day5_push"
-  );
-  const day5PushedInWindow = day5Runs.reduce((s, b) => s + (b.processed || 0), 0);
+    const bucket = STAGE_TO_BUCKET[r.newStage];
+    if (!bucket) continue; // RNR / Not Reachable / drop stages never push
+    const key = `${date}||${bucket}`;
+    const cell = immediate.get(key) ?? { pushed: 0, failed: 0, seen: new Set<string>(), dupes: 0 };
 
-  // Pull GAds lead_submitted conversions by day
-  const gadsRows = await getConversionsByDay(startDate, endDate, ["lead_submitted"]);
-
-  const gadsByDate = new Map<string, number>();
-  for (const r of gadsRows) {
-    if (r.conversionAction.includes("lead_submitted")) {
-      gadsByDate.set(r.date, (gadsByDate.get(r.date) ?? 0) + r.conversions);
+    // Dedupe only on a REAL identity. An earlier version used
+    // `prospectId || gclid+"|"+email`, which evaluates to the truthy string
+    // "|" when all three are blank — collapsing every identity-less row into
+    // one. Most were skips, but ec_only ledger rows with no gclid/email were
+    // silently dropped from the count too.
+    const identity = r.prospectId || (r.gclid ? `g:${r.gclid}` : "") || (r.email ? `e:${r.email}` : "");
+    if (identity) {
+      if (cell.seen.has(identity)) {
+        cell.dupes++;
+        immediate.set(key, cell);
+        continue;
+      }
+      cell.seen.add(identity);
     }
+
+    if (isPush) cell.pushed++;
+    else cell.failed++;
+    immediate.set(key, cell);
   }
 
-  // Build diff table — all dates in YYYY-MM-DD
-  const allDates = Array.from(
-    new Set([...relayByDate.keys(), ...gadsByDate.keys()])
-  ).sort().reverse();
+  // ── Google side, keyed (date, bucket) ───────────────────────────────────
+  const gadsCell = new Map<string, number>();
+  const gadsTotalsByBucket = new Map<string, number>();
+  for (const g of gadsRows) {
+    const action = g.conversionAction.toLowerCase();
+    // disqualified must be tested before qualified — "disqualified" contains it
+    const bucket = action.includes("disqualified")
+      ? "DISQUALIFIED"
+      : action.includes("qualified")
+      ? "QUALIFIED"
+      : action.includes("lead_submitted")
+      ? "LEAD_SUBMITTED"
+      : action.includes("converted")
+      ? "CONVERTED"
+      : action.includes("signup")
+      ? "SIGNUP"
+      : "";
+    if (!bucket) continue;
+    gadsCell.set(`${g.date}||${bucket}`, (gadsCell.get(`${g.date}||${bucket}`) ?? 0) + g.conversions);
+    gadsTotalsByBucket.set(bucket, (gadsTotalsByBucket.get(bucket) ?? 0) + g.conversions);
+  }
 
-  const diffTable = allDates.map((date) => {
-    const relay =
-      relayByDate.get(date) ??
-      { attempted: 0, pushedNow: 0, awaitingDay5: 0, failed: 0, seen: new Set<string>(), dupes: 0 };
-    const gadsCount = gadsByDate.get(date) ?? 0;
-    // Expected = pushed immediately + those the day-5 sweep will file under
-    // THIS date. For matured dates the sweep has already run, so expected
-    // should equal delivered.
-    const relayExpected = relay.pushedNow + relay.awaitingDay5;
-    const gap = relayExpected - gadsCount;
-    const gapPct = relayExpected > 0 ? ((gap / relayExpected) * 100).toFixed(1) : "0.0";
-    const tooRecent = isTooRecentForA5(date);
+  const allKeys = Array.from(new Set([...immediate.keys(), ...gadsCell.keys()]));
+  const perBucket = allKeys
+    .map((key) => {
+      const [date, bucket] = key.split("||");
+      const cell = immediate.get(key) ?? { pushed: 0, failed: 0, seen: new Set<string>(), dupes: 0 };
+      const received = gadsCell.get(key) ?? 0;
+      const gap = cell.pushed - received;
+      return {
+        date,
+        bucket,
+        gads_action: BUCKET_TO_ACTION[bucket] ?? bucket,
+        relay_pushed_immediately: cell.pushed,
+        relay_duplicates_ignored: cell.dupes,
+        relay_failed: cell.failed,
+        gads_received: received,
+        gap,
+        status: isTooRecentForA5(date)
+          ? "⏳ TOO_RECENT_FOR_A5"
+          : cell.pushed === 0 && received === 0
+          ? "➖ NO_VOLUME"
+          : Math.abs(gap) <= 2
+          ? "✅ OK"
+          : gap > 0
+          ? "⚠️ RELAY_AHEAD"
+          : "🔴 GADS_AHEAD",
+      };
+    })
+    .sort((a, b) => (a.date === b.date ? a.bucket.localeCompare(b.bucket) : b.date.localeCompare(a.date)));
 
-    return {
-      date,
-      relay_rows: relay.attempted,
-      relay_duplicate_rows_ignored: relay.dupes,
-      relay_pushed_immediately: relay.pushedNow,
-      relay_awaiting_day5: relay.awaitingDay5,
-      relay_failed: relay.failed,
-      relay_expected_sent: relayExpected,
-      gads_lead_submitted: gadsCount,
-      gap,
-      gap_pct: `${gapPct}%`,
-      status: tooRecent
-        ? "⏳ TOO_RECENT_FOR_A5"
-        : relayExpected === 0 && gadsCount === 0
-        ? "➖ NO_VOLUME"
-        : Math.abs(gap) <= 2
-        ? "✅ OK"
-        : gap > 0
-        ? "⚠️ RELAY_AHEAD"
-        : "🔴 GADS_AHEAD",
-    };
-  });
-
-  // Only dates that have actually cleared the A5 delay window are a fair
-  // test of whether relay-sent and Google-Ads-received line up. Recent dates
-  // are excluded from the health/gap total, not just individually labeled,
-  // or a run of fresh zero-vs-zero days would still average into "healthy"
-  // for the wrong reason and mask a real gap in the matured cohort.
-  // NO_VOLUME days are excluded too: a 0-vs-0 day is not evidence of health,
-  // and a run of them would previously average a real gap away to nothing.
-  const maturedRows = diffTable.filter(
+  const matured = perBucket.filter(
     (r) => r.status !== "⏳ TOO_RECENT_FOR_A5" && r.status !== "➖ NO_VOLUME"
   );
+  const MIN_MATURED_CELLS = 7;
+  const insufficient = matured.length < MIN_MATURED_CELLS;
+  const totalPushed = matured.reduce((s, r) => s + r.relay_pushed_immediately, 0);
+  const totalReceived = matured.reduce((s, r) => s + r.gads_received, 0);
+  const gap = totalPushed - totalReceived;
 
-  // This tool takes an explicit date range (there is no default lookback to
-  // widen), so guarding SAMPLE SIZE is what actually prevents a verdict being
-  // issued on too little matured data. A 7-day range leaves only ~2 usable
-  // days once the A5 window is excluded — not enough to call either way.
-  const MIN_MATURED_DAYS = 7;
-  const insufficientSample = maturedRows.length < MIN_MATURED_DAYS;
-  const totalRelaySent = maturedRows.reduce((s, r) => s + r.relay_expected_sent, 0);
-  const totalGads = maturedRows.reduce((s, r) => s + r.gads_lead_submitted, 0);
-  const totalGap = totalRelaySent - totalGads;
-  const overallGapPct = totalRelaySent > 0 ? ((totalGap / totalRelaySent) * 100).toFixed(1) : "0.0";
+  // ── Leg 2: day-5, window volume only ────────────────────────────────────
+  const day5Runs = batchRows.filter(
+    (b) =>
+      classifyBatchRun(b.status, b.message, (b.processed || 0) + (b.dropped || 0) + (b.failed || 0)) ===
+      "day5_push"
+  );
+  const day5Pushed = day5Runs.reduce((s, b) => s + (b.processed || 0), 0);
+  const day5Failed = day5Runs.reduce((s, b) => s + (b.failed || 0), 0);
+  const awaitingTotal = Array.from(awaitingByDate.values()).reduce((s, n) => s + n, 0);
 
   return {
     summary: {
       period: `${startDate} to ${endDate}`,
-      matured_dates_only_note: `Totals below only include dates ${A5_PUSH_DELAY_DAYS}+ days old — recent dates are still inside the A5 delay window and are reported per-day but excluded from the health verdict.`,
-      date_axis: "Google Ads queried on all_conversions_by_conversion_date, so segments.date is the CONVERSION date and aligns with relay row dates. Previously click-dated, which made this comparison structurally invalid.",
-      numerator_basis:
-        "relay_expected_sent = pushed-immediately + awaiting-day-5. Post-A5 a New Lead row writes " +
-        "A5_LEDGER_ONLY/A5_PENDING_LEDGER, so counting only SUCCESS gave a zero numerator on every " +
-        "post-A5 date. For MATURED dates the day-5 sweep has already run, so expected should equal " +
-        "delivered; for recent dates it is a forecast, which is why they are excluded from the verdict.",
-      remaining_limitation:
-        "The day-5 leg is an EXPECTATION derived from ledger rows, not per-prospect confirmation — " +
-        "BatchLog is aggregate and has no prospect IDs. A lead whose day-5 push failed permanently " +
-        "would still be counted as expected here. Confirming per-prospect needs Firestore.",
-      day5_pushes_executed_in_window: day5PushedInWindow,
-      day5_volume_note:
-        "From BatchLog, keyed on PUSH date (~5 days after the conversion date it carries), so this is " +
-        "a total-volume cross-check only and is deliberately NOT joined per-date.",
-      relay_total_sent: totalRelaySent,
-      gads_total_received: totalGads,
-      total_gap: totalGap,
-      gap_pct: `${overallGapPct}%`,
-      matured_days_used: maturedRows.length,
-      health: insufficientSample
-        ? "❔ INSUFFICIENT_MATURED_SAMPLE"
-        : Math.abs(totalGap) / Math.max(totalRelaySent, 1) < 0.05
-        ? "✅ HEALTHY"
-        : "⚠️ NEEDS_REVIEW",
-      ...(insufficientSample
-        ? {
-            sample_warning:
-              `Only ${maturedRows.length} matured day(s) in this range (need ${MIN_MATURED_DAYS}+). ` +
-              `The A5 ${A5_PUSH_DELAY_DAYS}-day delay consumes the most recent dates, so request a range of ` +
-              `at least ${MIN_MATURED_DAYS + A5_PUSH_DELAY_DAYS} days to get a verdict.`,
-          }
-        : {}),
+      date_axis:
+        "Google queried on all_conversions_by_conversion_date, so segments.date is the CONVERSION " +
+        "date and aligns with relay row dates. Previously click-dated, which made this comparison " +
+        "structurally invalid.",
+      scope:
+        "The per-date verdict covers IMMEDIATE pushes only (forward upgrades and disqualifications), " +
+        "which the Log records definitively. The day-5 leg is reported as window volume below and is " +
+        "deliberately EXCLUDED from the verdict — see day5_why_not_per_date.",
+      immediate_leg: {
+        relay_pushed: totalPushed,
+        gads_received: totalReceived,
+        gap,
+        gap_pct: totalPushed > 0 ? `${((gap / totalPushed) * 100).toFixed(1)}%` : "0.0%",
+        matured_cells_used: matured.length,
+        health: insufficient
+          ? "❔ INSUFFICIENT_MATURED_SAMPLE"
+          : Math.abs(gap) / Math.max(totalPushed, 1) < 0.05
+          ? "✅ HEALTHY"
+          : "⚠️ NEEDS_REVIEW",
+        ...(insufficient
+          ? {
+              sample_warning:
+                `Only ${matured.length} matured date/bucket cell(s) (need ${MIN_MATURED_CELLS}+). ` +
+                `The A5 ${A5_PUSH_DELAY_DAYS}-day window consumes recent dates; widen the range.`,
+            }
+          : {}),
+      },
+      day5_leg: {
+        pushes_executed: day5Pushed,
+        failures: day5Failed,
+        ledger_rows_awaiting_in_window: awaitingTotal,
+        why_not_per_date:
+          "runDay5Push() uploads whichever bucket the lead occupies AT day 5, not the bucket implied " +
+          "by the ledger row visible here — post-A5 only 423 of 757 ledger rows targeted " +
+          "LEAD_SUBMITTED. And when a lead changes stage repeatedly during its hold, only the last " +
+          "ledger state pushes, which the Log cannot identify. Counting ledger rows as expected " +
+          "lead_submitted produced a spurious ~25% gap that looked like loss and was not. " +
+          "Per-date day-5 attribution needs Firestore.",
+      },
+      gads_totals_by_bucket: Object.fromEntries(gadsTotalsByBucket),
     },
-    daily_diff: diffTable,
+    per_date_bucket: perBucket,
   };
 }
