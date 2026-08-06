@@ -280,15 +280,20 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
         "and excluded from every verdict.",
       per_bucket_per_era: bucketVerdicts,
       known_anomalies:
-        "DISQUALIFIED runs in opposite directions either side of A5 go-live and neither direction " +
-        "is explained. PRE-A5: Google records several times what the relay pushed — something other " +
-        "than the immediate path was writing disqualified conversions, and it stops at 2026-07-20 " +
-        "(the legacy runAdjustmentBatch trigger was retired that day, but restatements adjust " +
-        "existing conversions rather than create them, so that explanation is unconfirmed). " +
-        "POST-A5: the relay pushes several times what Google records, on near-100% ec_only traffic, " +
-        "consistent with EC identifier match failure but not demonstrated. Neither is resolvable " +
-        "from the Log — both need offline_conversion_upload_conversion_action_summary (Layer 2), " +
-        "which separates 'Google rejected the upload' from 'Google accepted it and did not match'.",
+        "RESOLVED — was a tooling bug, not a pipeline anomaly. Pre-A5 DISQUALIFIED previously read " +
+        "-274% GADS_AHEAD because the bucket was derived from a hardcoded stage table that omitted " +
+        "RNR, Not Reachable and Marketing Lead — 558 real ₹1 disqualification pushes counted as " +
+        "zero. Buckets are now read from the relay's own log message. The apparent 'sign flip' on " +
+        "2026-07-21 was A5 changing RNR handling (RNR now routes to A5_PENDING_LEDGER instead of " +
+        "pushing immediately), NOT the legacy runAdjustmentBatch retirement. " +
+        "REMAINING OPEN QUESTION: every bucket now reads RELAY_AHEAD in the same direction — " +
+        "LEAD_SUBMITTED +23%, QUALIFIED +44%, SIGNUP +46%, DISQUALIFIED +52%, CONVERTED +60%. The " +
+        "relay records a successful upload; Google records fewer conversions. Note LEAD_SUBMITTED, " +
+        "the most GCLID-rich bucket, has the SMALLEST gap, which is what EC identifier match " +
+        "failure would predict. Suggestive, not demonstrated: relay SUCCESS means Google's API " +
+        "accepted the upload, not that Google matched and recorded it. Resolving this needs " +
+        "offline_conversion_upload_conversion_action_summary (Layer 2), which separates 'Google " +
+        "rejected the upload' from 'Google accepted it and did not match'.",
       immediate_leg: {
         relay_pushed: totalPushed,
         gads_received: totalReceived,
