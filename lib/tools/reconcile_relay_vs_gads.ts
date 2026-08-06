@@ -29,6 +29,33 @@ import { isTooRecentForA5, A5_PUSH_DELAY_DAYS, isA5Pending, classifyBatchRun } f
 // day-5 leg is now reconciled at WINDOW-VOLUME level only, and excluded from
 // the per-date verdict. Per-date day-5 attribution requires Firestore.
 
+// ── BUCKET RESOLUTION ─────────────────────────────────────────────────────
+// Read the bucket the relay ACTUALLY USED, from its own log message. Deriving
+// it from a stage table was a mistake: the table omitted RNR, Not Reachable
+// and Marketing Lead, which pre-A5 pushed ₹1 disqualifications — 558 real
+// pushes counted as zero. That alone produced a fake "-274% GADS_AHEAD
+// anomaly" on pre-A5 DISQUALIFIED which was nearly written up as a pipeline
+// finding. With those rows counted the bucket reads +53% RELAY_AHEAD, the
+// same direction as every other bucket.
+//
+// Message formats, in priority order:
+//   pre-A5 immediate : "✅ ₹1 sent | ... | bucket:DISQUALIFIED | stage:RNR"
+//   post-A5 upgrade  : "A5: forward upgrade to CONVERTED pushed immediately"
+//   post-A5 disqual  : "A5: disqualified ₹1 sent | no restatement cascade"
+//   ledger rows      : "A5: pre-day5, stage=QUALIFIED — ledger updated"
+// The stage table is a last-resort fallback only.
+function resolveBucket(message: string, newStage: string): string | null {
+  const m = message || "";
+  const explicit = m.match(/bucket:([A-Z_]+)/);
+  if (explicit) return explicit[1];
+  const upgrade = m.match(/forward upgrade to ([A-Z_]+)/);
+  if (upgrade) return upgrade[1];
+  if (/disqualified ₹1 sent/.test(m)) return "DISQUALIFIED";
+  const staged = m.match(/stage=([A-Z_]+)/);
+  if (staged) return staged[1];
+  return STAGE_TO_BUCKET[newStage] ?? null;
+}
+
 const STAGE_TO_BUCKET: Record<string, string> = {
   "New Lead": "LEAD_SUBMITTED",
   "Future Interest": "SIGNUP",
@@ -94,8 +121,8 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
     const isFail = !!r.status && r.status.includes("FAIL");
     if (!isPush && !isFail) continue;
 
-    const bucket = STAGE_TO_BUCKET[r.newStage];
-    if (!bucket) continue; // RNR / Not Reachable / drop stages never push
+    const bucket = resolveBucket(r.message, r.newStage);
+    if (!bucket) continue; // genuinely unresolvable — no push recorded
     const key = `${date}||${bucket}`;
     const cell = immediate.get(key) ?? { pushed: 0, failed: 0, seen: new Set<string>(), dupes: 0 };
 
