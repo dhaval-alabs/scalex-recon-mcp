@@ -56,7 +56,19 @@ export interface ConversionDayStat {
   conversionAction: string;
   conversions: number;
   conversionValue: number;
+  /** Which Google metric produced `conversions`. Never read a number from this
+   *  module without it — `metrics.conversions` and
+   *  `all_conversions_by_conversion_date` disagree by design and two tools
+   *  reporting different figures for "conversions" is what made an entire
+   *  week's reconciliation unreadable. */
+  metric: string;
+  /** Which date `date` refers to. click_date and conversion_date are different
+   *  questions; an unlabelled date segment is not interpretable. */
+  axis: "conversion_date" | "click_date";
 }
+
+export const METRIC_LABEL = "all_conversions_by_conversion_date";
+export const AXIS_LABEL = "conversion_date" as const;
 
 // ─────────────────────────────────────────────────────────────────────────
 // DATE AXIS — this is the single most important thing about this function.
@@ -133,7 +145,14 @@ export async function getConversionsByDay(
     const val = Number(pick(r, "metrics.allConversionsValueByConversionDate") ?? 0);
     const key = `${date}||${action}`;
     const existing =
-      map.get(key) ?? { date, conversionAction: action, conversions: 0, conversionValue: 0 };
+      map.get(key) ?? {
+        date,
+        conversionAction: action,
+        conversions: 0,
+        conversionValue: 0,
+        metric: METRIC_LABEL,
+        axis: AXIS_LABEL,
+      };
     existing.conversions += conv;
     existing.conversionValue += val;
     map.set(key, existing);
@@ -141,9 +160,40 @@ export async function getConversionsByDay(
 
   let results = Array.from(map.values());
   if (actionNames && actionNames.length > 0) {
+    const before = results.length;
     results = results.filter((r) =>
       actionNames.some((n) => r.conversionAction.toLowerCase().includes(n.toLowerCase()))
     );
+
+    // ── WHY THERE IS NO THROW HERE ───────────────────────────────────────
+    // A silent-zero guard belongs where a zero can masquerade as no-data.
+    // That is true in alabs-ga-mcp, which reads `metrics.conversions`: an
+    // action excluded from a campaign's bid goals returns 0 there while
+    // recording real volume, and the two are indistinguishable.
+    //
+    // It is NOT true here. This module reads
+    // all_conversions_by_conversion_date, which counts non-biddable actions
+    // too, so a zero is a zero.
+    //
+    // The remaining ambiguity is a filter matching nothing. That is left to
+    // the caller deliberately: both callers pass ["sclx"] over short windows
+    // where genuinely zero _sclx conversions is a correct answer, and
+    // verify_batch_landed already labels its result `gads_volume_present`
+    // with an explicit note that it cannot confirm a specific batch landed.
+    // Throwing would convert correct behaviour into a crash.
+    //
+    // What IS enforced: every row leaving this module carries `metric` and
+    // `axis`, so no number can be compared against another tool's number
+    // without both being identified first.
+    if (before > 0 && results.length === 0) {
+      // Intentionally not an error. Recorded here so the condition is visible
+      // in logs rather than inferred from an empty array.
+      console.warn(
+        `[gads-client] actionNames filter [${actionNames.join(", ")}] matched 0 of ${before} ` +
+          `actions for ${startDate}..${endDate}. Metric=${METRIC_LABEL}. This is a real zero for ` +
+          `these action names in this window, not a failed query.`
+      );
+    }
   }
   return results;
 }
@@ -151,14 +201,22 @@ export async function getConversionsByDay(
 export async function getConversionTotals(
   startDate: string,
   endDate: string
-): Promise<{ conversionAction: string; total: number }[]> {
+): Promise<{ conversionAction: string; total: number; metric: string; axis: string }[]> {
   const rows = await getConversionsByDay(startDate, endDate);
   const map = new Map<string, number>();
   for (const r of rows) {
     map.set(r.conversionAction, (map.get(r.conversionAction) ?? 0) + r.conversions);
   }
+  // Every number leaving this module carries its metric and axis. A bare
+  // `total` is not reportable — it cannot be reconciled against any other
+  // tool without knowing which of Google's several conversion metrics it is.
   return Array.from(map.entries())
-    .map(([conversionAction, total]) => ({ conversionAction, total }))
+    .map(([conversionAction, total]) => ({
+      conversionAction,
+      total,
+      metric: METRIC_LABEL,
+      axis: AXIS_LABEL,
+    }))
     .sort((a, b) => b.total - a.total);
 }
 
