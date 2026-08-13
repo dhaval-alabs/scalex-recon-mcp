@@ -280,20 +280,21 @@ export async function reconcileRelayVsGads(params: { startDate: string; endDate:
         "and excluded from every verdict.",
       per_bucket_per_era: bucketVerdicts,
       known_anomalies:
-        "RESOLVED — was a tooling bug, not a pipeline anomaly. Pre-A5 DISQUALIFIED previously read " +
-        "-274% GADS_AHEAD because the bucket was derived from a hardcoded stage table that omitted " +
-        "RNR, Not Reachable and Marketing Lead — 558 real ₹1 disqualification pushes counted as " +
-        "zero. Buckets are now read from the relay's own log message. The apparent 'sign flip' on " +
-        "2026-07-21 was A5 changing RNR handling (RNR now routes to A5_PENDING_LEDGER instead of " +
-        "pushing immediately), NOT the legacy runAdjustmentBatch retirement. " +
-        "REMAINING OPEN QUESTION: every bucket now reads RELAY_AHEAD in the same direction — " +
-        "LEAD_SUBMITTED +23%, QUALIFIED +44%, SIGNUP +46%, DISQUALIFIED +52%, CONVERTED +60%. The " +
-        "relay records a successful upload; Google records fewer conversions. Note LEAD_SUBMITTED, " +
-        "the most GCLID-rich bucket, has the SMALLEST gap, which is what EC identifier match " +
-        "failure would predict. Suggestive, not demonstrated: relay SUCCESS means Google's API " +
-        "accepted the upload, not that Google matched and recorded it. Resolving this needs " +
-        "offline_conversion_upload_conversion_action_summary (Layer 2), which separates 'Google " +
-        "rejected the upload' from 'Google accepted it and did not match'.",
+        "RESOLVED (1) — the pre-A5 DISQUALIFIED '-274% GADS_AHEAD anomaly' was a tooling bug, not a " +
+        "pipeline fault. Buckets were re-derived from a hardcoded stage table that omitted RNR, " +
+        "Not Reachable and Marketing Lead, so 558 real ₹1 disqualification pushes counted as zero. " +
+        "Buckets are now read from the relay's own log message. The apparent sign flip on 2026-07-21 " +
+        "was A5 changing RNR handling, NOT the legacy runAdjustmentBatch retirement. " +
+        "RESOLVED (2) — the uniform RELAY_AHEAD gap across all buckets is ENHANCED CONVERSIONS " +
+        "DELIVERING ZERO. Measured 2026-08-10 on crm_webhook_disqualified_sclx over 16 paired days " +
+        "(2026-07-21..08-05): 44 GCLID-bearing pushes, 388 ec_only pushes, 41 conversions recorded. " +
+        "Predicted-if-ec_only-delivers-zero = 44 vs 41 actual. Recorded equalled the GCLID count " +
+        "exactly on 10 of 16 days and within 1 on 15 of 16. correlation(gclid,recorded)=0.918; " +
+        "correlation(ec_only,recorded)=0.185. 388 ec_only uploads produced nothing measurable. " +
+        "This is measured, not a two-parameter fit, and it supersedes the earlier 'suggestive, needs " +
+        "Layer 2' note — Layer 2 cannot answer it, because Google counts CLICK_NOT_FOUND inside " +
+        "successful_event_count. Consequence: a bucket's delivery rate is its GCLID share. The " +
+        "residual (41 vs 44) puts GCLID delivery near 93%, not 100%.",
       immediate_leg: {
         relay_pushed: totalPushed,
         gads_received: totalReceived,
