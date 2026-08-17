@@ -30,11 +30,40 @@ export async function getRelayHealth(params: { days?: number }) {
   }
 
   const total = rows.length;
+
+  // ── DOUBLE-COUNT GUARD (added 2026-08-17) ──────────────────────────────
+  // Relay v10.9.8 item 17 made runDay5Push() write its FAILURES into the Log
+  // tab so their reasons could finally be read. That fix worked — it is how
+  // the click-window cause was diagnosed. But this tool reads the Log tab as
+  // the FORWARD-UPGRADE leg and BatchLog as the DAY-5 leg, so from 13 Aug
+  // every day-5 failure was counted in BOTH.
+  //
+  // Measured on 12-17 Aug: 20 GADS_PARTIAL_FAIL rows in the Log tab, of which
+  // 19 carried a DAY5 marker (14 "DAY5 PUSH FAILED" + 5 "DAY5 EXPIRED") and
+  // exactly 1 was a genuine forward-upgrade failure. The 14 reconcile exactly
+  // against BatchLog's own failure count for the same window — same events,
+  // two places.
+  //
+  // Effect of the bug: forward-upgrade failure rate read 32.8% (20/61) when
+  // the true rate was 2.3% (1/44), and the combined delivery error rate read
+  // 15.04% against a true 7.18%. An independent review reported the 32.8% as
+  // a live incident and proposed porting a relay fix to a path that did not
+  // need it.
+  //
+  // Day-5 rows are identified by the marker runDay5Push() writes into the
+  // message column. Both variants are matched: "DAY5 PUSH FAILED" (real
+  // failure) and "DAY5 EXPIRED" (v10.9.9 terminal click-window
+  // reclassification).
+  const isDay5Row = (r: { message?: string }) => /DAY5 /.test(r.message || "");
+  const day5RowsInLog = rows.filter(isDay5Row).length;
+  const forwardRows = rows.filter((r) => !isDay5Row(r));
+
   const success = statusCounts.get("SUCCESS") ?? 0;
   const ecOnly = statusCounts.get("SUCCESS_EC_ONLY") ?? 0;
-  const failed = Array.from(statusCounts.entries())
-    .filter(([k]) => isFailed(k))
-    .reduce((s, [, v]) => s + v, 0);
+
+  // Failures counted over FORWARD rows only. Day-5 failures are counted once,
+  // from BatchLog, in the day-5 leg below.
+  const failed = forwardRows.filter((r) => isFailed(r.status || "")).length;
   const skipped = Array.from(statusCounts.entries())
     .filter(([k]) => isTrueSkip(k))
     .reduce((s, [, v]) => s + v, 0);
@@ -50,6 +79,35 @@ export async function getRelayHealth(params: { days?: number }) {
   const gclidNone = (gclidSourceCounts.get("ec_only") ?? 0) + (gclidSourceCounts.get("none") ?? 0);
 
   const pct = (n: number) => `${((n / total) * 100).toFixed(1)}%`;
+
+  // ── ATTACH RATE DENOMINATOR (fixed 2026-08-17) ─────────────────────────
+  // gclid_attach_rate and ec_only_rate were both computed over ALL rows.
+  // Measured 12-17 Aug: 274 gclid+ec / 1,372 rows = 20.0%, and ec_only_rate
+  // was simply its complement at 80.0% — which folded 929 SKIP_NON_PPC rows
+  // into "ec_only" despite those never being upload candidates at all.
+  //
+  // This matters beyond presentation: we have been quoting attach rate as the
+  // delivery rate, in documents and to the client, on that denominator.
+  //
+  // Correct denominator is rows that actually carry an identifier, i.e. are
+  // candidates for upload. Non-PPC skips carry none and are excluded.
+  const candidateRows = rows.filter((r) => {
+    const g = r.gclidSource || "none";
+    return g === "gclid+ec" || g === "ec_only";
+  });
+  const candidates = candidateRows.length;
+  const candGclid = candidateRows.filter((r) => r.gclidSource === "gclid+ec").length;
+  const candEcOnly = candidateRows.filter((r) => r.gclidSource === "ec_only").length;
+
+  // Pushed vs pending cannot be conflated: an A5_PENDING row is a candidate
+  // that has not been attempted yet, so including it in a DELIVERY rate
+  // measures intent rather than outcome. Reported separately.
+  const candPending = candidateRows.filter((r) => isA5Pending(r.status || "")).length;
+  const candAttempted = candidates - candPending;
+  const attGclid = candidateRows.filter(
+    (r) => r.gclidSource === "gclid+ec" && !isA5Pending(r.status || "")
+  ).length;
+  const cpct = (n: number, d: number) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : "n/a");
 
   // ── Day-5 leg (BatchLog) ───────────────────────────────────────────────
   // The Log tab only ever records FORWARD UPGRADES (a stage change on a lead
@@ -129,6 +187,13 @@ export async function getRelayHealth(params: { days?: number }) {
         "every lead's FIRST push happens in runDay5Push(), which writes to BatchLog/Firestore only. " +
         "Both legs are required for a true delivery figure.",
       forward_upgrades_log_tab: {
+        day5_rows_excluded_from_this_leg: day5RowsInLog,
+        day5_exclusion_note:
+          "Relay v10.9.8 writes day-5 FAILURES into the Log tab so their reasons are readable. " +
+          "Those rows are excluded here and counted once, from BatchLog, in the day-5 leg. Before " +
+          "this guard they were counted in both, which read as a 32.8% forward-upgrade failure " +
+          "rate against a true 2.3% on 12-17 Aug.",
+        failures: failed,
         total: forwardPushed,
         with_gclid: success,
         ec_only: ecOnly,
@@ -175,8 +240,30 @@ export async function getRelayHealth(params: { days?: number }) {
       // sample of all pushes and understates the true rate. Do not quote it
       // as the account-wide attach rate until the day-5 leg carries per-row
       // gclid data (needs Firestore).
-      gclid_attach_rate_log_rows_only: pct(gclidAttached),
-      ec_only_rate_log_rows_only: pct(gclidNone),
+      // ── Correct denominators: upload candidates only ──────────────────
+      gclid_attach_rate: cpct(attGclid, candAttempted),
+      ec_only_rate: cpct(candAttempted - attGclid, candAttempted),
+      attach_rate_basis: {
+        note:
+          "Computed over ATTEMPTED UPLOAD CANDIDATES only — rows carrying an identifier that have " +
+          "already been pushed. Non-PPC skips carry no identifier and are excluded; A5_PENDING rows " +
+          "are candidates not yet attempted and are excluded from the delivery-rate denominator. " +
+          "The superseded *_log_rows_only figures below divided by ALL rows, which folded ~two " +
+          "thirds SKIP_NON_PPC into 'ec_only' and understated attach rate by roughly 3x.",
+        total_rows: total,
+        upload_candidates: candidates,
+        of_which_pending: candPending,
+        attempted: candAttempted,
+        attempted_with_gclid: attGclid,
+        candidates_gclid_all: candGclid,
+        candidates_ec_only_all: candEcOnly,
+        still_biased:
+          "Log-tab rows are forward upgrades, which are late-funnel and structurally GCLID-poor. " +
+          "This is a corrected denominator on a still-biased sample. The day-5 leg carries no " +
+          "per-row gclid data in BatchLog, so an account-wide attach rate needs Firestore.",
+      },
+      gclid_attach_rate_log_rows_only_SUPERSEDED: pct(gclidAttached),
+      ec_only_rate_log_rows_only_SUPERSEDED: pct(gclidNone),
       delivery_error_rate: `${(deliveryErrorRate * 100).toFixed(2)}%`,
       skip_rate: pct(skipped),
       error_rate_legacy_denominator: pct(failed),
