@@ -278,8 +278,18 @@ export async function getRelayHealth(params: { days?: number }) {
       threshold: `${(DROP_LOSS_THRESHOLD * 100).toFixed(0)}%`,
       excluded_outlier_run: day5DropMaxRun,
       gates:
-        "Tightening GCLID_IMPORT_CUTOFF_DAYS (90→75) and EC_ONLY_IMPORT_CUTOFF_DAYS (63→58) will " +
-        "increase this by design. Watch this figure across that change, not just the error rate.",
+        "SUPERSEDED 2026-08-13 — do NOT read this as a plan. This field previously anticipated " +
+        "tightening GCLID_IMPORT_CUTOFF_DAYS (90→75) and EC_ONLY_IMPORT_CUTOFF_DAYS (63→58). " +
+        "That proposal (task 5b) is DROPPED. Reason, measured: every day-5 failure on 13 Aug " +
+        "returned Google's error \"its click occurred before this conversion's click-through " +
+        "window\", and all five _sclx actions already have clickThroughLookbackWindowDays=90, " +
+        "which is Google's maximum. So the rejections are a function of CLICK age, while " +
+        "isPastImportCutoff() filters on lead created_at — a proxy whose error margin is " +
+        "unknown per lead. Tightening the created_at wall would therefore discard leads whose " +
+        "clicks are still inside the window, to avoid sending ones Google rejects at no cost. " +
+        "The fix is task 5c (capture the real click date at pixel time), which lets the " +
+        "pre-flight check use the value Google actually measures. Relay v10.9.9 separately " +
+        "marks these rejections terminal so they stop being retried nightly.",
     },
     health:
       deliveryErrorRate < 0.05 && dropLossRate < DROP_LOSS_THRESHOLD
