@@ -86,16 +86,37 @@ export async function verifyBatchLanded(params: {
           message: batch.message ? batch.message.substring(0, 160) : "",
           gads_conversion_date_window: `${windowStart} to ${windowEnd}`,
           gads_sclx_conversions_in_window: gadsTotal,
-          gads_actions: adjustmentRows.map((r) => ({
-            action: r.conversionAction,
-            count: r.conversions,
-          })),
-          batch_health:
-            batch.failed > 0
-              ? "🔴 HAD_FAILURES"
-              : batch.processed > 0
-              ? "✅ RAN_CLEAN"
-              : "➖ NOTHING_ELIGIBLE",
+          // Aggregated by action. getConversionsByDay returns one row per
+          // (date, action), so mapping it directly emitted the same action name
+          // several times in one response — qualified_sclx appeared 6x on a
+          // 7-day window. Flagged 2026-08-10, folded in here.
+          gads_actions: Object.entries(
+            adjustmentRows.reduce<Record<string, number>>((acc, r) => {
+              acc[r.conversionAction] = (acc[r.conversionAction] ?? 0) + r.conversions;
+              return acc;
+            }, {})
+          )
+            .map(([action, count]) => ({ action, count: Number(count.toFixed(2)) }))
+            .sort((a, b) => b.count - a.count),
+          // Severity is proportional. Previously ANY single failure read 🔴,
+          // so a run pushing 24 of 25 looked identical to one that failed
+          // outright. At the current rate (~0.6 failures/night post-v10.9.9)
+          // that would be red most nights, which trains people to ignore it.
+          // The residual day-5 failure class is small and largely benign, so
+          // the threshold distinguishes "worth a look" from "worth an alarm".
+          batch_health: (() => {
+            const attempts = batch.processed + batch.failed;
+            if (attempts === 0) return "➖ NOTHING_ELIGIBLE";
+            const rate = batch.failed / attempts;
+            if (batch.failed === 0) return "✅ RAN_CLEAN";
+            if (rate > 0.2) return "🔴 HIGH_FAILURE_RATE";
+            return `⚠️ ${batch.failed} of ${attempts} failed (${(rate * 100).toFixed(1)}%)`;
+          })(),
+          batch_health_note:
+            "🔴 is reserved for >20% of attempts failing. A small number of day-5 failures per run " +
+            "is expected: click-window rejections are terminal by design (relay v10.9.9) and route " +
+            "to `dropped`, and the residual class runs ~0.6/night. Read `failed` against `processed`, " +
+            "not in isolation.",
           gads_volume_present: gadsTotal > 0 ? "✅ YES" : "⚠️ NONE_IN_WINDOW",
           interpretation:
             "batch_health comes from BatchLog and is authoritative for whether the run itself " +
