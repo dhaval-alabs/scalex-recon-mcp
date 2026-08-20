@@ -149,9 +149,18 @@ export async function getRelayHealth(params: { days?: number }) {
   // strictly worse than a failure, which gets retried on the next sweep. Yet
   // drops appeared nowhere in the health calculation.
   //
-  // This gates the cutoff tightening (GCLID_IMPORT_CUTOFF_DAYS 90→75,
-  // EC_ONLY 63→58): that change RAISES expiry drops by design, so without
-  // this the verdict would stay green while real loss climbed.
+  // SUPERSEDED 2026-08-13 — the justification below is stale, the LOGIC IS NOT.
+  // This block originally gated the cutoff tightening (GCLID_IMPORT_CUTOFF_DAYS
+  // 90→75, EC_ONLY 63→58) on the grounds that the change RAISES expiry drops by
+  // design. That proposal (task 5b) is DROPPED — see the full reasoning in the
+  // `loss.gates` field below, which is the authoritative record. In short: the
+  // rejections are a function of CLICK age while isPastImportCutoff() filters on
+  // lead created_at, so a tighter wall discards landable leads. Fix is task 5c.
+  //
+  // KEEP THE LOGIC REGARDLESS. Gating the verdict on drops is correct whether or
+  // not 5b ever ships: a drop is permanent signal loss where a failure is retried
+  // on the next sweep, so without this the verdict would stay green while real
+  // loss climbed. Only the 5b justification is stale.
   //
   // Uses dropped-excluding-largest-run, so a one-off backlog clear (the 7/20
   // A5 go-live dropped 2760 legacy ledger docs in a single run) cannot trip
