@@ -47,7 +47,52 @@ export function isTrueSkip(status: string | undefined): boolean {
 }
 
 export function isFailed(status: string | undefined): boolean {
+  // TEST_BLOCKED is neither a failure nor a real skip — it is an upload the
+  // relay's v10.9.11 test guard suppressed. Excluded explicitly so it cannot
+  // drift into a failure count as it would under a bare includes("FAIL").
+  if (isTestBlocked(status)) return false;
   return !!status && status.includes("FAIL");
+}
+
+// ── AUDIT ADDITIONS, 2026-08-20 ─────────────────────────────────────────
+// This file exists so "failed", "skip" and "pending" have ONE definition.
+// The audit found three definitions of failed: this one, plus inline
+// `status.includes("FAIL")` in get_signal_quality_trend and
+// reconcile_relay_vs_gads. They agree today, which is exactly why the
+// divergence was invisible — change this function and two tools silently keep
+// the old behaviour. The helpers below exist so the same cannot recur for the
+// three concepts the audit found duplicated or missing.
+
+// Relay v10.9.11 introduced this status when the test guard suppresses an
+// upload. Nothing classified it, so it was silently neither failed nor skipped.
+export function isTestBlocked(status: string | undefined): boolean {
+  return status === "TEST_BLOCKED";
+}
+
+// Relay v10.9.8 item 17 made runDay5Push() write its FAILURES into the Log tab
+// so their reasons could be read. But this codebase reads the Log tab as the
+// FORWARD-UPGRADE leg and BatchLog as the DAY-5 leg — so from 13 Aug those rows
+// counted in both. Measured on 12–17 Aug: 20 GADS_PARTIAL_FAIL rows in the Log,
+// 19 of them day-5, exactly 1 a genuine forward failure. That read as a 32.8%
+// forward failure rate against a true 2.3%, and an independent review reported
+// it as a live incident.
+//
+// get_relay_health was fixed on 17 Aug. get_signal_quality_trend was not, and
+// reconcile only avoids it BY ACCIDENT — day-5 messages happen not to match its
+// bucket patterns, so a message change would silently reintroduce it. One
+// definition, used by all three.
+export function isDay5Row(message: string | undefined): boolean {
+  return /DAY5 /.test(message || "");
+}
+
+// An "upload candidate" is a row that actually carried an identifier, i.e. was
+// a candidate for delivery at all. The audit found gclid_attach_rate and
+// ec_only_rate computed over ALL rows — roughly two thirds of which are
+// SKIP_NON_PPC and were never candidates. That understated attach rate about
+// threefold (20% reported against 63% on the correct denominator) and made
+// ec_only_rate its meaningless complement.
+export function isUploadCandidate(gclidSource: string | undefined): boolean {
+  return gclidSource === "gclid+ec" || gclidSource === "ec_only";
 }
 
 // A date is "too recent for A5" if it hasn't yet cleared the day-5 window —
