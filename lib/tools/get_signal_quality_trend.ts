@@ -150,7 +150,13 @@ export async function getSignalQualityTrend(params: {
   // Both are now VOLUME-WEIGHTED — sum of numerators over sum of denominators —
   // and the verdict is SUPPRESSED entirely below a minimum sample, because on
   // this data a direction claim is worse than no claim.
-  const MIN_ATTEMPTED_FOR_DIRECTION = 30;
+  // Applied PER HALF, not to the window total. First pass set a floor of 30 on
+  // the whole window, which does not guarantee either half is meaningful — on
+  // 19–26 Aug that passed at 59 total while the halves held 23 and 36, and the
+  // verdict was driven by a 6–7 lead swing between two days the tool had itself
+  // flagged sample_too_small. A comparison cannot be sounder than its weaker
+  // side, so each half must clear the floor independently.
+  const MIN_ATTEMPTED_PER_HALF = 30;
 
   const weighted = (arr: typeof trend) => {
     const att = arr.reduce((s, r) => s + r.upload_candidates_attempted, 0);
@@ -161,13 +167,21 @@ export async function getSignalQualityTrend(params: {
   };
 
   const totalAttempted = trend.reduce((s, r) => s + r.upload_candidates_attempted, 0);
+  const attemptedIn = (arr: typeof trend) =>
+    arr.reduce((s, r) => s + r.upload_candidates_attempted, 0);
+  const firstN = attemptedIn(firstHalf);
+  const secondN = attemptedIn(secondHalf);
   const firstW = weighted(firstHalf);
   const secondW = weighted(secondHalf);
 
+  const bothHalvesSufficient =
+    firstN >= MIN_ATTEMPTED_PER_HALF && secondN >= MIN_ATTEMPTED_PER_HALF;
+
   const trendDirection =
-    totalAttempted < MIN_ATTEMPTED_FOR_DIRECTION || firstW === null || secondW === null
-      ? `⚠️ NOT ASSESSED — only ${totalAttempted} attempted uploads in this window ` +
-        `(need ${MIN_ATTEMPTED_FOR_DIRECTION}). A direction verdict on this sample would be noise.`
+    !bothHalvesSufficient || firstW === null || secondW === null
+      ? `⚠️ NOT ASSESSED — ${firstN} vs ${secondN} attempted uploads per half ` +
+        `(need ${MIN_ATTEMPTED_PER_HALF} in each). A direction verdict on this sample would be noise. ` +
+        `Widen the window or wait for volume.`
       : secondW > firstW + 2
       ? "📈 IMPROVING"
       : secondW < firstW - 2
@@ -183,6 +197,17 @@ export async function getSignalQualityTrend(params: {
     // Volume-weighted across the whole window, not a mean of daily rates.
     avg_gclid_attach_rate: overall === null ? "n/a" : `${overall.toFixed(1)}%`,
     total_attempted_uploads: totalAttempted,
+    direction_basis: {
+      first_half_attempted: firstN,
+      second_half_attempted: secondN,
+      first_half_attach_rate: firstW === null ? "n/a" : `${firstW.toFixed(1)}%`,
+      second_half_attach_rate: secondW === null ? "n/a" : `${secondW.toFixed(1)}%`,
+      min_per_half: MIN_ATTEMPTED_PER_HALF,
+      note:
+        "Both halves are volume-weighted. The verdict is suppressed unless EACH half clears the " +
+        "floor — a comparison cannot be sounder than its weaker side. Shown so the verdict can be " +
+        "checked rather than taken on trust.",
+    },
     basis:
       "gclid_attach_rate and ec_only_rate are computed over ATTEMPTED upload candidates only — " +
       "rows carrying an identifier that have already been pushed. Non-PPC skips carry no identifier " +
