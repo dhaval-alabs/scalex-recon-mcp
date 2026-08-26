@@ -1,3 +1,8 @@
+// ⚠️ UNUSED — ZERO IMPORTERS as of the 2026-08-20 audit.
+// Both exports below (runBQQuery, getAdSpendByDay) are dead: nothing in lib/ or
+// app/ imports this module. Kept rather than deleted because the capture layer
+// needs a BigQuery read path for the account-wide GCLID attach rate, and this is
+// the obvious place for it. Marked so a reader does not assume it is wired in.
 import { BigQuery } from "@google-cloud/bigquery";
 
 const PROJECT_ID = "scalex-version1";
