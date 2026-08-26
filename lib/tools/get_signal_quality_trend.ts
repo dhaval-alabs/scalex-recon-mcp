@@ -137,21 +137,69 @@ export async function getSignalQualityTrend(params: {
   const mid = Math.floor(trend.length / 2);
   const firstHalf = trend.slice(0, mid);
   const secondHalf = trend.slice(mid);
-  const avgAttach = (arr: typeof trend) =>
-    arr.reduce((s, r) => s + r.gclid_attach_rate, 0) / Math.max(arr.length, 1);
+
+  // AUDIT FIX 2026-08-20 (second pass): both the direction verdict and the
+  // headline average were computed by AVERAGING DAILY RATES — the same defect
+  // corrected in the weekly rollup above, left in place four lines below it.
+  // A day with 2 attempted uploads weighed the same as a day with 50.
+  //
+  // Observed live on the 19–26 Aug window: attempted counts of 2, 7, 2, 12, 6,
+  // 18, 6, 3. On 2 events a single lead swings the daily rate 33–50 points, so
+  // an average of those rates produced a DEGRADING verdict out of pure noise.
+  //
+  // Both are now VOLUME-WEIGHTED — sum of numerators over sum of denominators —
+  // and the verdict is SUPPRESSED entirely below a minimum sample, because on
+  // this data a direction claim is worse than no claim.
+  const MIN_ATTEMPTED_FOR_DIRECTION = 30;
+
+  const weighted = (arr: typeof trend) => {
+    const att = arr.reduce((s, r) => s + r.upload_candidates_attempted, 0);
+    if (att === 0) return null;
+    const num = arr.reduce(
+      (s, r) => s + Math.round((r.gclid_attach_rate / 100) * r.upload_candidates_attempted), 0);
+    return (num / att) * 100;
+  };
+
+  const totalAttempted = trend.reduce((s, r) => s + r.upload_candidates_attempted, 0);
+  const firstW = weighted(firstHalf);
+  const secondW = weighted(secondHalf);
+
   const trendDirection =
-    avgAttach(secondHalf) > avgAttach(firstHalf) + 2
+    totalAttempted < MIN_ATTEMPTED_FOR_DIRECTION || firstW === null || secondW === null
+      ? `⚠️ NOT ASSESSED — only ${totalAttempted} attempted uploads in this window ` +
+        `(need ${MIN_ATTEMPTED_FOR_DIRECTION}). A direction verdict on this sample would be noise.`
+      : secondW > firstW + 2
       ? "📈 IMPROVING"
-      : avgAttach(secondHalf) < avgAttach(firstHalf) - 2
+      : secondW < firstW - 2
       ? "📉 DEGRADING"
       : "➡️ STABLE";
+
+  const overall = weighted(trend);
 
   return {
     period: `${startDate} to ${endDate}`,
     granularity,
     trend_direction: trendDirection,
-    avg_gclid_attach_rate: `${(trend.reduce((s, r) => s + r.gclid_attach_rate, 0) / trend.length).toFixed(1)}%`,
-    trend,
+    // Volume-weighted across the whole window, not a mean of daily rates.
+    avg_gclid_attach_rate: overall === null ? "n/a" : `${overall.toFixed(1)}%`,
+    total_attempted_uploads: totalAttempted,
+    basis:
+      "gclid_attach_rate and ec_only_rate are computed over ATTEMPTED upload candidates only — " +
+      "rows carrying an identifier that have already been pushed. Non-PPC skips carry no identifier " +
+      "and are excluded; A5_PENDING rows are candidates not yet attempted and are excluded from the " +
+      "delivery denominator, reported separately as candidates_pending. Day-5 failure rows that relay " +
+      "v10.9.8 writes into the Log tab are excluded — they belong to the day-5 leg, reported by " +
+      "get_relay_health. THIS IS NOT AN ACCOUNT-WIDE ATTACH RATE: the Log tab is the forward-upgrade " +
+      "leg, which is late-funnel and structurally GCLID-poor, and typically ~90% of candidates in any " +
+      "window are still pending. An account-wide figure needs per-row identifier state from the " +
+      "capture layer.",
+    per_day_caveat:
+      "Days with fewer than 10 attempted uploads are marked sample_too_small. A 0% or 100% reading " +
+      "there is one or two leads, not a signal.",
+    trend: trend.map((r) => ({
+      ...r,
+      sample_too_small: r.upload_candidates_attempted < 10,
+    })),
   };
 }
 
